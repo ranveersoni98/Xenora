@@ -388,14 +388,18 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         // Partial: the process code page is always UTF-8.
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
-    let symbol = "_get_narrow_winmain_command_line";
-    let s = Arc::clone(state);
-    registry.register_with_status(UCRT, symbol, ServiceStatus::Partial, move |_, _, memory| {
-        s.get_command_line(memory, Encoding::Narrow)
-            .map(|line| line.argument_tail)
-            .map_err(ExitReason::MemoryFault)
-    });
-    registry.alias(UCRT_RUNTIME, UCRT, symbol);
+    for (symbol, encoding) in [
+        ("_get_narrow_winmain_command_line", Encoding::Narrow),
+        ("_get_wide_winmain_command_line", Encoding::Wide),
+    ] {
+        let s = Arc::clone(state);
+        registry.register_with_status(UCRT, symbol, ServiceStatus::Partial, move |_, _, memory| {
+            s.get_command_line(memory, encoding)
+                .map(|line| line.argument_tail)
+                .map_err(ExitReason::MemoryFault)
+        });
+        registry.alias(UCRT_RUNTIME, UCRT, symbol);
+    }
 }
 
 #[cfg(test)]

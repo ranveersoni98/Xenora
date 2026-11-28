@@ -1418,8 +1418,8 @@
       "evidence_class": "D",
       "issue": 1254,
       "pr": 1262,
-      "test_status": "PR #1262 records 11 passing local tests, including an intentional failure followed by a fresh session.",
-      "limitations": "The explicit package uses one guest thread; dynamic lifetime, exceptions and independent review remain open.",
+      "test_status": "Merged PR #1262 compiles the original EXE and two DLLs independently. Two non-author reviewers ran clean a1b69294. The automated ARM64 loader test passed and the separately built native CLI returned 70, 23, 125, then 70 for the valid package, corrupted bytes, omitted consumer, and fresh replay.",
+      "limitations": "One shared synthetic UCRT on one guest thread. Dynamic module lifetime and other C++ runtime contracts are tracked separately.",
       "ownership_state": "Ready for integration",
       "counts_toward_personal_workload": false,
       "assignment_side": "external"
@@ -2241,6 +2241,23 @@
       "ownership_state": "Ready for integration",
       "counts_toward_personal_workload": false,
       "assignment_side": "external"
+    },
+    {
+      "id": "WP-1476",
+      "subsystem": "Runtime",
+      "description": "Verify GNU vector rollback and retry after a throwing element copy",
+      "priority": "P1",
+      "dependencies": [],
+      "owner": "catminou4",
+      "status": "PR_OPEN",
+      "evidence_class": "D",
+      "issue": 1476,
+      "pr": 1481,
+      "test_status": "The exact signed 285262ab ARM64 integration test passed both -O1 and -O2 guests. A second reviewer rebuilt both guests and ran them with the exact clean a1b69294 CLI. At each build, package, omitted unwinder and fresh package returned 0, 125, and 0. Both successes verify original vector address, size, capacity and elements after the copy throws, then successful growth and seven completed constructions and destructions.",
+      "limitations": "GNU single-EXE fixture using static libstdc++ and explicitly supplied installed shared libgcc. Omission is a pre-entry startup control. This witness covers one STL container and exception path.",
+      "ownership_state": "Ready for integration",
+      "counts_toward_personal_workload": false,
+      "assignment_side": "external"
     }
   ],
   "ownership_states": {
@@ -2258,7 +2275,7 @@
       "id": "R1",
       "status": "PARTIAL",
       "goal": "Original compiled C application with comprehensive supported CRT coverage",
-      "evidence": "On c8210aaf, Gate A1 and A2 passed 13 tests covering startup, allocation, strings, arithmetic, files, stdio, errors and exit. Open PR #1330 adds byte-exact narrow time formatting and six documented directives, with two independent native fixture runs. Open PR #1385 verifies that escaped percent signs count toward the narrow and wide CRT output limits, with successful sizing at the limit and refusal one unit above it. Open PR #1391 combines CRT environment variables, file scanning, exact floating arithmetic, leap-day UTC formatting and file output in one original hosted C program. It checks absent initial state, a malformed scan and fresh replay at two compiler optimization levels. Draft PR #1401 independently verifies narrow-input scanf character and string destination widths for ASCII, including secure wide buffers and terminator capacity. One shared legacy test still expects %ls to be unsupported and awaits coordination. Open PR #1432 verifies a hosted C-locale index at two compiler optimization levels. It checks exact transform capacity and byte ordering, sorts transformed keys with an ordinal tie-break, and repeats successful and missing binary searches from a fresh state with reversed input. Open PR #1448 reports a wide WinMain command-line tail through the exact UCRT runtime API-set binding.",
+      "evidence": "On c8210aaf, Gate A1 and A2 passed 13 tests covering startup, allocation, strings, arithmetic, files, stdio, errors and exit. Open PR #1330 adds byte-exact narrow time formatting and six documented directives, with two independent native fixture runs. Open PR #1385 verifies that escaped percent signs count toward the narrow and wide CRT output limits, with successful sizing at the limit and refusal one unit above it. Open PR #1391 combines CRT environment variables, file scanning, exact floating arithmetic, leap-day UTC formatting and file output in one original hosted C program. It checks absent initial state, a malformed scan and fresh replay at two compiler optimization levels. Draft PR #1401 independently verifies narrow-input scanf character and string destination widths for ASCII, including secure wide buffers and terminator capacity. One shared legacy test still expects %ls to be unsupported and awaits coordination. Open PR #1432 verifies a hosted C-locale index at two compiler optimization levels. It checks exact transform capacity and byte ordering, sorts transformed keys with an ordinal tie-break, and repeats successful and missing binary searches from a fresh state with reversed input. Open PR #1448 reports a wide WinMain command-line tail through the exact UCRT runtime API-set binding. On the exact open #312 branch, two native builds reproduced an aligned allocation application with qsort and bsearch, and a non-power-of-two alignment refusal with EINVAL. A zero-size allocation returns non-null instead. The same exact aligned API-set imports prevent startup on clean a1b69294.",
       "remaining": "Integrate the hosted workloads, consolidate positive and negative coverage by supported CRT family, and record full R1 acceptance. The wide calendar import is awaiting shared file coordination in #1440.",
       "sources": [
         "https://github.com/ranveersoni98/Xenora/blob/main/docs/testing/gate-a.md",
@@ -2268,30 +2285,33 @@
         "https://github.com/ranveersoni98/Xenora/pull/1401",
         "https://github.com/ranveersoni98/Xenora/pull/1432",
         "https://github.com/ranveersoni98/Xenora/issues/1440",
-        "https://github.com/ranveersoni98/Xenora/pull/1448"
+        "https://github.com/ranveersoni98/Xenora/pull/1448",
+        "https://github.com/ranveersoni98/Xenora/pull/312#issuecomment-7246073718"
       ]
     },
     {
       "id": "R2",
       "status": "PARTIAL",
       "goal": "Original compiled C++ application with construction, destruction and STL",
-      "evidence": "On c8210aaf, the original GNU C++ suite passed three tests. Merged PR #1269 records a separate Microsoft x64 object-lifetime witness. Merged PR #1256 adds a bounded synthetic standard output stream. Open PR #1328 verifies four synthetic codecvt data cells across two independently compiled DLLs with two independent native fixture runs. Open PR #1384 verifies ownership transfer, duplicate-key rejection and exact destruction order in an original hosted GNU std::map guest.",
+      "evidence": "On c8210aaf, the original GNU C++ suite passed three tests. Merged PR #1269 records a separate Microsoft x64 object-lifetime witness. Merged PR #1256 adds a bounded synthetic standard output stream. Open PR #1328 verifies four synthetic codecvt data cells across two independently compiled DLLs with two independent native fixture runs. Open PR #1384 verifies ownership transfer, duplicate-key rejection and exact destruction order in an original hosted GNU std::map guest. Open PR #1481 adds an original compiled GNU C++ vector workload. At both optimization levels a throwing copy leaves the original storage, capacity and record order intact, a retry grows the vector, and all seven completed constructions are destroyed. Two independent ARM64 runs include the exact pre-entry refusal when the shared GNU unwinder is omitted.",
       "remaining": "Microsoft-header stream startup, output, cleanup, failures and independent acceptance.",
       "sources": [
         "https://github.com/ranveersoni98/Xenora/blob/main/crates/loader/tests/guest_cpp_path.rs",
         "https://github.com/ranveersoni98/Xenora/pull/1269",
         "https://github.com/ranveersoni98/Xenora/pull/1256",
         "https://github.com/ranveersoni98/Xenora/pull/1328",
-        "https://github.com/ranveersoni98/Xenora/pull/1384"
+        "https://github.com/ranveersoni98/Xenora/pull/1384",
+        "https://github.com/ranveersoni98/Xenora/pull/1481"
       ]
     },
     {
       "id": "R3",
-      "status": "PARTIAL",
+      "status": "VERIFIED",
       "goal": "Multi-DLL application with cross-module runtime ownership",
-      "evidence": "The package startup suite passed six tests on c8210aaf. PRs #1262 and #1269 record original CRT and C++ ownership witnesses. Merged PR #1280 verifies CRT startup and teardown order across dependent DLLs. Open PR #1328 checks shared runtime data, bidirectional writes and fresh-state zero initialization across the EXE and both DLLs. Open PR #1343 verifies independent static TLS templates and cross-module accesses on the initial guest thread. Draft PR #1360 verifies transactional initial-thread TLS staging and rollback. Open PR #1370 verifies GNU exception propagation through two C DLL frames. Open PR #1387 verifies pre-entry refusal for Microsoft x64 typeid, pointer downcast and side cast, and cast to the complete object through void*. Its RTTI-free control runs virtual calls. Open PR #1398 verifies cleanup across two DLLs: the consumer receives FLS callbacks and the producer destroys and frees each C++ record. Open PR #1418 verifies a noncopyable exception object thrown in the producer DLL, caught by const reference in the EXE and destroyed once by producer-defined code after the catch. Both guests use the same explicitly packaged unwinder. Open PR #1431 adds nested exception ownership across an independent producer DLL, bridge DLL and EXE. The inner object is destroyed in the bridge handler and the EXE catches the original outer object at the same address before the producer-defined destructor runs. Open PR #1461 verifies cross-module COM task-memory ownership with two exact independent ARM64 tests, including failure preservation, successful consumer growth and caller release.",
-      "remaining": "Independently verify the full ownership milestone. Cover dynamic module lifetime, worker TLS and exception ownership with the fully shared GNU runtime. Microsoft x64 RTTI implementation and cross-module type identity remain open.",
+      "evidence": "The original EXE and two DLLs from merged PR #1262 meet the multi-DLL runtime ownership milestone. Two non-author reviewers derived the expected shared CRT behavior and reproduced it on clean upstream a1b69294. The fixture compiles the three images independently and proves shared import data and errno plus allocation in one DLL and release in another. The corrupted payload returns 23 only after the guest observes release. Omitting the consumer returns 125 before entry. Fresh replay returns 70 with the original marker and zero errno. The package startup suite passed six tests on c8210aaf. PRs #1262 and #1269 record original CRT and C++ ownership witnesses. Merged PR #1280 verifies CRT startup and teardown order across dependent DLLs. Open PR #1328 checks shared runtime data, bidirectional writes and fresh-state zero initialization across the EXE and both DLLs. Open PR #1343 verifies independent static TLS templates and cross-module accesses on the initial guest thread. Draft PR #1360 verifies transactional initial-thread TLS staging and rollback. Open PR #1370 verifies GNU exception propagation through two C DLL frames. Open PR #1387 verifies pre-entry refusal for Microsoft x64 typeid, pointer downcast and side cast, and cast to the complete object through void*. Its RTTI-free control runs virtual calls. Open PR #1398 verifies cleanup across two DLLs: the consumer receives FLS callbacks and the producer destroys and frees each C++ record. Open PR #1418 verifies a noncopyable exception object thrown in the producer DLL, caught by const reference in the EXE and destroyed once by producer-defined code after the catch. Both guests use the same explicitly packaged unwinder. Open PR #1431 adds nested exception ownership across an independent producer DLL, bridge DLL and EXE. The inner object is destroyed in the bridge handler and the EXE catches the original outer object at the same address before the producer-defined destructor runs. Open PR #1461 verifies cross-module COM task-memory ownership with two exact independent ARM64 tests, including failure preservation, successful consumer growth and caller release.",
+      "remaining": "Separately tracked cross-module capabilities include dynamic module lifetime, worker TLS, exception ownership with a fully shared GNU runtime and Microsoft RTTI and type identity.",
       "sources": [
+        "https://github.com/ranveersoni98/Xenora/issues/1254#issuecomment-7245979317",
         "https://github.com/ranveersoni98/Xenora/blob/main/crates/loader/tests/package_startup.rs",
         "https://github.com/ranveersoni98/Xenora/pull/1262",
         "https://github.com/ranveersoni98/Xenora/pull/1269",
@@ -2305,6 +2325,16 @@
         "https://github.com/ranveersoni98/Xenora/pull/1418",
         "https://github.com/ranveersoni98/Xenora/pull/1431",
         "https://github.com/ranveersoni98/Xenora/pull/1461"
+      ],
+      "independent_reviews": [
+        {
+          "reviewer": "Independent Codex loader regression reviewer",
+          "source": "https://github.com/ranveersoni98/Xenora/issues/1254#issuecomment-7245979317"
+        },
+        {
+          "reviewer": "Independent Codex native CLI package reviewer",
+          "source": "https://github.com/ranveersoni98/Xenora/issues/1254#issuecomment-7245979317"
+        }
       ]
     },
     {
@@ -2332,7 +2362,7 @@
       "id": "R5",
       "status": "PARTIAL",
       "goal": "Original exception-handling and unwinding fixture",
-      "evidence": "On c8210aaf, two compiled GNU C++ unwinding tests and twelve compiled C structured exception tests passed. Open PR #1345 verifies the documented RaiseException null argument-array rule using original compiled C filters. Open PR #1370 adds a typed GNU catch and destructor order after unwinding through two independently compiled C DLL frames. The throw, catch and destructors reside in the executable. Open PR #1418 records independent ARM64 runs at two optimization levels for a DLL throw, an EXE catch by const reference and the exact order of both stack guards and the producer-defined exception-object destructor. The same package refuses startup without the installed GNU shared SEH unwinder and succeeds again on fresh replay. Open PR #1431 verifies that a bare rethrow after a nested typed catch preserves the outer exception object and the exact guard and destructor order. Two independent ARM64 runs cover both optimization levels, pre-entry refusal without the shared unwinder and fresh replay. Open PR #1441 reports local execution through the exact VCRUNTIME140 C structured exception handler alias with declined and accepting filters, abnormal finally and continuation.",
+      "evidence": "On c8210aaf, two compiled GNU C++ unwinding tests and twelve compiled C structured exception tests passed. Open PR #1345 verifies the documented RaiseException null argument-array rule using original compiled C filters. Open PR #1370 adds a typed GNU catch and destructor order after unwinding through two independently compiled C DLL frames. The throw, catch and destructors reside in the executable. Open PR #1418 records independent ARM64 runs at two optimization levels for a DLL throw, an EXE catch by const reference and the exact order of both stack guards and the producer-defined exception-object destructor. The same package refuses startup without the installed GNU shared SEH unwinder and succeeds again on fresh replay. Open PR #1431 verifies that a bare rethrow after a nested typed catch preserves the outer exception object and the exact guard and destructor order. Two independent ARM64 runs cover both optimization levels, pre-entry refusal without the shared unwinder and fresh replay. Open PR #1441 reports local execution through the exact VCRUNTIME140 C structured exception handler alias with declined and accepting filters, abnormal finally and continuation. Open PR #1481 adds an original compiled GNU C++ vector workload. At both optimization levels a throwing copy leaves the original storage, capacity and record order intact, a retry grows the vector, and all seven completed constructions are destroyed. Two independent ARM64 runs include the exact pre-entry refusal when the shared GNU unwinder is omitted.",
       "remaining": "Cover the Microsoft C++ personality, shared C++ and pthread runtime loading, nested exceptions, unsupported records and post-abort cleanup. A separate fully shared GNU package from the installed MinGW-w64 GCC 16.2.0 toolchain failed before entry with 35 unresolved imports.",
       "sources": [
         "https://github.com/ranveersoni98/Xenora/blob/main/docs/research/exception-handling.md",
@@ -2341,14 +2371,15 @@
         "https://github.com/ranveersoni98/Xenora/pull/1370",
         "https://github.com/ranveersoni98/Xenora/pull/1418",
         "https://github.com/ranveersoni98/Xenora/pull/1431",
-        "https://github.com/ranveersoni98/Xenora/pull/1441"
+        "https://github.com/ranveersoni98/Xenora/pull/1441",
+        "https://github.com/ranveersoni98/Xenora/pull/1481"
       ]
     },
     {
       "id": "R6",
       "status": "PARTIAL",
       "goal": "Original COM application with supported object lifecycle",
-      "evidence": "Merged PR #1261 adds opt-in server locks and unload eligibility. Open PRs #1296 and #1324 cover cross-module ownership and simultaneous STA and MTA initialization and lifetime. Open PR #1374 combines same-apartment DLL ownership, a separate worker apartment and balanced factory locking in one original package, including isolated live-object and lock controls. Two independent ARM64 runs passed the fifteen COM and package tests on the combined source tree. Open PR #1434 reports local cleanup of task-owned GUID and BLOB variants, with preserved allocations on the invalid descriptor and ownership controls. Open PR #1461 independently verifies COM task ownership across an EXE and two DLLs, including failed resize preserving the original block, successful resize preserving the prefix, cross-module free and VT_LPWSTR cleanup.",
+      "evidence": "Merged PR #1261 adds opt-in server locks and unload eligibility. Open PRs #1296 and #1324 cover cross-module ownership and simultaneous STA and MTA initialization and lifetime. Open PR #1374 combines same-apartment DLL ownership, a separate worker apartment and balanced factory locking in one original package, including isolated live-object and lock controls. Two independent ARM64 runs passed the fifteen COM and package tests on the combined source tree. Open PR #1434 reports local cleanup of task-owned GUID and BLOB variants, with preserved allocations on the invalid descriptor and ownership controls. Open PR #1461 independently verifies COM task ownership across an EXE and two DLLs, including failed resize preserving the original block, successful resize preserving the prefix, cross-module free and VT_LPWSTR cleanup. The independently reproduced fixture-only PR #1374 at 36a05552 runs against the unchanged a1b69294 production tree. Its regression remains open for integration.",
       "remaining": "Integrate the open COM fixtures and record upstream acceptance of the opt-in synthetic lifecycle.",
       "sources": [
         "https://github.com/ranveersoni98/Xenora/blob/main/docs/runtime/com.md",
@@ -2364,7 +2395,7 @@
       "id": "R7",
       "status": "PARTIAL",
       "goal": "Repeated runtime sessions with resource and state isolation",
-      "evidence": "The authored-package session harness checks repeated runs and handle cleanup. Merged PR #1262 records a CRT success, failure and fresh-run sequence. Open PRs #1324 and #1328 verify fresh state after exact startup refusal in two additional contracts. Open PR #1344 checks last-event retirement after deliberate failure, exact detach and fresh-success replay. Draft PR #1360 verifies allocation rollback and slot reuse after failed initial-thread TLS staging. Open PR #1370 repeats a successful package run after an exact missing-provider refusal. Open PR #1398 verifies both normal and explicit worker teardown, a missing-consumer refusal, and fresh successful package replay. Open PR #1414 verifies two interleaved CPU reference authored sessions using the same guest journal path. A peer cleanup failure leaves the surviving session’s frame output and virtual clock intact, and a fresh launch resets both counters. Open PR #1452 reports a live guest worker across authored PE frames with independent initial-thread TLS, a full-width input journal, exact frame bytes, fresh replay and early stop. The campaign also reproduced its exact three frame digests and clean shutdown twice on native Metal in the integrated tree.",
+      "evidence": "The authored-package session harness checks repeated runs and handle cleanup. Merged PR #1262 records a CRT success, failure and fresh-run sequence. Open PRs #1324 and #1328 verify fresh state after exact startup refusal in two additional contracts. Open PR #1344 checks last-event retirement after deliberate failure, exact detach and fresh-success replay. Draft PR #1360 verifies allocation rollback and slot reuse after failed initial-thread TLS staging. Open PR #1370 repeats a successful package run after an exact missing-provider refusal. Open PR #1398 verifies both normal and explicit worker teardown, a missing-consumer refusal, and fresh successful package replay. Open PR #1414 verifies two interleaved CPU reference authored sessions using the same guest journal path. A peer cleanup failure leaves the surviving session’s frame output and virtual clock intact, and a fresh launch resets both counters. Open PR #1452 reports a live guest worker across authored PE frames with independent initial-thread TLS, a full-width input journal, exact frame bytes, fresh replay and early stop. The campaign also reproduced its exact three frame digests and clean shutdown twice on native Metal in the integrated tree. The independently reproduced fixture-only PR #1414 at 5f5dc0f8 runs against the unchanged a1b69294 production tree. Its regression remains open for integration.",
       "remaining": "Exercise callback, worker TLS and shutdown interactions across repeated sessions and obtain independent acceptance.",
       "sources": [
         "https://github.com/ranveersoni98/Xenora/blob/main/crates/cli/tests/pe_session.rs",

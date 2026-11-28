@@ -19,7 +19,7 @@
 
 use super::{
     CURRENT_PROCESS, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOACCESS,
-    ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, KERNEL32, ServicesState,
+    ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, KERNEL32, ObjectState, ServicesState,
 };
 use crate::cpu::ExitReason;
 use crate::export_table::{ExportTable, ExportTarget};
@@ -520,12 +520,34 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 return state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
             }
             let path = if main {
-                state
-                    .crt_arguments()
-                    .for_command_line()
-                    .first()
-                    .cloned()
-                    .unwrap_or_default()
+                // The process image path is the image the process runs, not
+                // its first argument: a multi-call binary re-executed under
+                // an applet name still has the one image, as busybox-w32's
+                // forkshell re-execution does when it passes the shell's
+                // name as argv[0] and then stats its own executable before
+                // spawning (#1290). The argument form stays as the fallback
+                // of a machine that keeps no image.
+                let image = state.spawn_image_name();
+                if image.is_empty() {
+                    state
+                        .crt_arguments()
+                        .for_command_line()
+                        .first()
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    // Windows always answers an absolute path here, and the
+                    // guests rely on it: busybox-w32 stats this very path
+                    // before every spawn, so a relative form stops resolving
+                    // as soon as the process leaves the directory it started
+                    // in (#1342). The canonical drive key anchored at the
+                    // volume root is the absolute form of the provisioned
+                    // image wherever the working directory stands.
+                    match ObjectState::drive_path(image.as_bytes()) {
+                        Some(key) if !key.is_empty() => format!("c:\\{}", key),
+                        _ => image,
+                    }
+                }
             } else {
                 dynamic_name.expect("validated dynamic module name")
             };

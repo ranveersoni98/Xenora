@@ -1754,9 +1754,7 @@ pub(super) fn register_directories(registry: &mut ImportRegistry, state: &Arc<Se
             set_errno(memory, cpu.gs_base, EINVAL)?;
             return Ok(0);
         }
-        let cwd = getcwd.crt_directory.lock().expect("CRT working directory");
-        let form = windows_form(&cwd);
-        drop(cwd);
+        let form = windows_form(&getcwd.crt_streams().working_directory());
         if args.rdx < form.len() as u64 + 1 {
             set_errno(memory, cpu.gs_base, ERANGE)?;
             return Ok(0);
@@ -1773,8 +1771,10 @@ pub(super) fn register_directories(registry: &mut ImportRegistry, state: &Arc<Se
     let chdir = Arc::clone(state);
     registry.register(UCRT, "_chdir", move |args, cpu, memory| {
         let input = read_crt_string(memory, args.rcx, 260).map_err(ExitReason::MemoryFault)?;
-        let mut cwd = chdir.crt_directory.lock().expect("CRT working directory");
-        let resolved = resolve_directory(&cwd, &input);
+        let resolved = {
+            let streams = chdir.crt_streams();
+            resolve_directory(&streams.working_directory(), &input)
+        };
         let exists = resolved.is_empty() || {
             let objects = chdir.objects.lock().expect("guest object state");
             objects.directories.contains(&resolved)
@@ -1783,7 +1783,7 @@ pub(super) fn register_directories(registry: &mut ImportRegistry, state: &Arc<Se
             set_errno(memory, cpu.gs_base, ENOENT)?;
             return Ok(u64::from(u32::MAX));
         }
-        *cwd = resolved;
+        chdir.crt_streams().set_working_directory(resolved);
         Ok(0)
     });
 

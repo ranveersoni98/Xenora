@@ -437,9 +437,11 @@ mod tests {
                 )
                 .unwrap();
 
-            // Leave enough heap space for desktop, but not both strings.
+            // Leave enough heap space for one string's page, but not both.
+            // Heap commits are page granular, so each string costs one page
+            // whatever its byte length is.
             let pressure = memory
-                .map_heap_allocation(PROCESS_HEAP, DYNAMIC_BUDGET as usize - desktop.len())
+                .map_heap_allocation(PROCESS_HEAP, DYNAMIC_BUDGET as usize - 4096)
                 .unwrap();
             assert_eq!(
                 state.get_startup_info(&mut memory, OUTPUT, encoding),

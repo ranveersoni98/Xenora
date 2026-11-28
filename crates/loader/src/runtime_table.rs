@@ -5727,6 +5727,7 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     registry.register_with_status("ucrtbase.dll", "__p__fmode", ServiceStatus::Partial, move |args, cpu, memory| {
         let _ = args;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        eprintln!("FMODEDBG __p__fmode called");
         let result: u64 = handlers::file_mode_pointer(&mut context)?;
         Ok(result.place(cpu))
     });

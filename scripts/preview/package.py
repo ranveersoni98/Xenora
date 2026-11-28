@@ -9,11 +9,12 @@ import unicodedata
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
+from release.bundle import APP_EXECUTABLE
+from release.bundle import BUNDLE_EXECUTABLES as EXECUTABLES
+from release.bundle import BUNDLE_HELPERS as HELPERS
 from release.macho import check_archs, check_otool_linkage
 
-APP_NAME = "Xenora.app"
-HELPERS = ("xenora-cli", "xenora-pe-session")
-EXECUTABLES = ("Xenora", *HELPERS)
+APP_NAME = f"{APP_EXECUTABLE}.app"
 CONTENTS = f"{APP_NAME}/Contents"
 DIRECTORIES = {
     APP_NAME,
@@ -179,7 +180,7 @@ def inspect_app(app: Path, *, run) -> dict:
         plist = plistlib.load(source)
     if (
         not isinstance(plist, dict)
-        or plist.get("CFBundleExecutable") != "Xenora"
+        or plist.get("CFBundleExecutable") != APP_EXECUTABLE
         or plist.get("CFBundlePackageType") != "APPL"
     ):
         raise ValueError("expected Xenora executable and APPL package type in Info.plist")

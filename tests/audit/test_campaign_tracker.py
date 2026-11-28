@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import importlib.util
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 from pathlib import Path
 import unittest
@@ -11,6 +13,84 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("campaign_tracker", ROOT / "scripts/audit/campaign_tracker.py")
 tracker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(tracker)
+
+
+class WorkPackageTests(unittest.TestCase):
+    def test_sync_leaves_verified_packages_and_timestamp_unchanged(self):
+        pulls = {
+            1: {"state": "closed", "merged_at": "2026-11-28T00:00:00Z"},
+            2: {"state": "open", "merged_at": None},
+            3: {"state": "closed", "merged_at": None},
+        }
+        issues = {4: {"state": "closed"}, 5: {"state": "open"}}
+        data = {
+            "updated_at": "2026-11-27",
+            "work_packages": [
+                {"id": f"pr-{number}", "status": "VERIFIED", "pr": number, "issue": None}
+                for number in pulls
+            ] + [
+                {"id": f"issue-{number}", "status": "VERIFIED", "pr": None, "issue": number}
+                for number in issues
+            ],
+        }
+        with (
+            patch.object(tracker, "api_objects", side_effect=[pulls, issues]),
+            patch.object(tracker, "save") as save,
+        ):
+            self.assertEqual(tracker.sync(data), [])
+        save.assert_not_called()
+        self.assertEqual(data["updated_at"], "2026-11-27")
+        self.assertTrue(all(row["status"] == "VERIFIED" for row in data["work_packages"]))
+
+    def test_sync_still_updates_active_packages_from_pull_and_issue_state(self):
+        data = {"work_packages": [
+            {"id": "merged-pull", "status": "PR_OPEN", "pr": 1, "issue": None},
+            {"id": "open-pull", "status": "TESTING", "pr": 2, "issue": None},
+            {"id": "closed-issue", "status": "CLAIMED", "pr": None, "issue": 3},
+        ]}
+        pulls = {
+            1: {"state": "closed", "merged_at": "2026-11-28T00:00:00Z"},
+            2: {"state": "open", "merged_at": None},
+        }
+        issues = {3: {"state": "closed"}}
+        with (
+            patch.object(tracker, "api_objects", side_effect=[pulls, issues]),
+            patch.object(tracker, "save") as save,
+        ):
+            changes = tracker.sync(data)
+        self.assertEqual(changes, [
+            "merged-pull: PR_OPEN -> MERGED",
+            "open-pull: TESTING -> PR_OPEN",
+            "closed-issue: CLAIMED -> SUPERSEDED",
+        ])
+        self.assertEqual(
+            [row["status"] for row in data["work_packages"]],
+            ["MERGED", "PR_OPEN", "SUPERSEDED"],
+        )
+        save.assert_called_once_with(data)
+
+    def test_dashboard_counts_only_enabled_unfinished_assignments(self):
+        statuses = [
+            ("MERGED", True), ("VERIFIED", True), ("SUPERSEDED", True),
+            ("IMPLEMENTING", True), ("TESTING", False),
+        ]
+        data = {"work_packages": [
+            {
+                "status": status,
+                "counts_toward_personal_workload": enabled,
+                "assignment_side": "personal",
+                "ownership_state": "Catminou-owned",
+                "subsystem": "runtime",
+            }
+            for status, enabled in statuses
+        ], "runtime_acceptance": []}
+        output = StringIO()
+        with redirect_stdout(output):
+            tracker.dashboard(data)
+        self.assertIn(
+            "personal assignments: total=5 completed=2 remaining_implementation=1",
+            output.getvalue().splitlines(),
+        )
 
 
 class RuntimeEvidenceTests(unittest.TestCase):

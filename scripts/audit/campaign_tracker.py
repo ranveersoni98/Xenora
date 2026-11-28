@@ -3,8 +3,8 @@
 """Validate and reconcile the Xenora campaign tracker.
 
 `--check` is deterministic and offline. `--sync` uses the installed `gh` CLI to
-refresh PR/issue states from upstream; it never changes ownership, evidence
-classification, test evidence, or limitations.
+refresh PR and issue states from upstream. Independent verification and its
+evidence stay under manual review.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ STATES = {
     "BLOCKED",
     "SUPERSEDED",
 }
+COMPLETED_STATES = {"MERGED", "VERIFIED"}
+FINISHED_IMPLEMENTATION_STATES = COMPLETED_STATES | {"SUPERSEDED"}
 EVIDENCE = {"A", "B", "C", "D", "E"}
 RUNTIME_MILESTONES = {f"R{number}" for number in range(1, 10)}
 MILESTONE_STATES = {"PARTIAL", "BLOCKED", "VERIFIED"}
@@ -245,6 +247,8 @@ def sync(data: dict) -> list[str]:
     changes: list[str] = []
     for package in data["work_packages"]:
         current = package["status"]
+        if current == "VERIFIED":
+            continue
         pull = pulls.get(package["pr"]) if package["pr"] is not None else None
         issue = issues.get(package["issue"]) if package["issue"] is not None else None
         if pull is not None:
@@ -255,7 +259,7 @@ def sync(data: dict) -> list[str]:
             else:
                 desired = "SUPERSEDED"
         elif issue is not None:
-            if issue["state"] == "closed" and current not in {"MERGED", "VERIFIED", "SUPERSEDED"}:
+            if issue["state"] == "closed" and current not in FINISHED_IMPLEMENTATION_STATES:
                 desired = "SUPERSEDED"
             elif current in STATES:
                 desired = current
@@ -281,8 +285,12 @@ def dashboard(data: dict) -> None:
             print(f"  {state}: {count}")
     for side in ("personal", "external"):
         group = [package for package in packages if package["assignment_side"] == side]
-        completed = sum(package["status"] in {"MERGED", "VERIFIED"} for package in group)
-        remaining = sum(package["counts_toward_personal_workload"] for package in group)
+        completed = sum(package["status"] in COMPLETED_STATES for package in group)
+        remaining = sum(
+            package["counts_toward_personal_workload"]
+            and package["status"] not in FINISHED_IMPLEMENTATION_STATES
+            for package in group
+        )
         print(f"{side} assignments: total={len(group)} completed={completed} remaining_implementation={remaining}")
     for ownership in sorted(OWNERSHIP_STATES):
         count = sum(package["ownership_state"] == ownership for package in packages)

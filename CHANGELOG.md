@@ -542,6 +542,7 @@ remains unsupported.
 
 ### Fixed
 
+- The Ascension tracker preserves verified work during GitHub synchronization and excludes completed or superseded packages from remaining implementation counts (#1278).
 - QA verification now fingerprints tracked and non-ignored checkout inputs, including binary fixtures. A source change detected during the suites makes the evidence stale even if the original files are restored later. Suite exit codes are preserved (#1237).
 - `xenora-pe-session` refuses a DLL selected as the root before guest startup, including sessions without companion modules (#1275).
 - The typed CRT registry regenerates the existing `_locking` and `_commit` imports from its source catalog and checks both generated reports in the normal test suite (#1264). Both services are partial. The guest drive stores writes in memory, and lock conflicts return immediately.

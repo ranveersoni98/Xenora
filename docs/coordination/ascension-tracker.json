@@ -2020,6 +2020,125 @@
       "ownership_state": "Awaiting external dependency",
       "counts_toward_personal_workload": false,
       "assignment_side": "external"
+    },
+    {
+      "id": "WP-1444",
+      "subsystem": "Runtime",
+      "description": "One-byte ANSI character writes to Win32 console screen cells",
+      "priority": "P1",
+      "dependencies": [],
+      "owner": "catminou4",
+      "status": "PR_OPEN",
+      "evidence_class": "D",
+      "issue": 1444,
+      "pr": 1450,
+      "test_status": "On the a1b69294-equivalent baseline both compiled guests exited 14 on wide readback of the ANSI write. Two independent ARM64 runs at 34bded2b passed at -O1 and -O2. They checked one-byte ANSI characters, 16-bit attributes, a wide U+03A9 cell and the clipped caller-buffer edge.",
+      "limitations": "Covers the existing bounded screen-cell model and an ASCII input witness. Code-page conversion and ANSI reads are outside this change.",
+      "ownership_state": "Ready for integration",
+      "counts_toward_personal_workload": false,
+      "assignment_side": "external"
+    },
+    {
+      "id": "WP-1445",
+      "subsystem": "Runtime",
+      "description": "Compiler-initialized GNU worker TLS across condition-variable waits",
+      "priority": "P1",
+      "dependencies": [],
+      "owner": "catminou4",
+      "status": "PR_OPEN",
+      "evidence_class": "D",
+      "issue": 1445,
+      "pr": 1451,
+      "test_status": "Two independent ARM64 runs at 4396f98e passed at -O1 and -O2 with scheduler quanta 64 and 1024. The initial thread and two overlapping workers had distinct addresses and exactly one initializer each. Worker values survived the rendezvous and timeout, and critical-section reacquisition allowed release. The shared virtual clock reached exactly 50,000 ticks for the two concurrent 5 ms waits.",
+      "limitations": "Covers a dynamically initialized scalar with GCC emulated TLS under the synthetic scheduler. Nonzero templates, retirement and C++ thread-local destructors need separate evidence.",
+      "ownership_state": "Ready for integration",
+      "counts_toward_personal_workload": false,
+      "assignment_side": "external"
+    },
+    {
+      "id": "WP-1417",
+      "subsystem": "Tooling",
+      "description": "Compare exact wanted-import bindings across registry snapshots",
+      "priority": "P1",
+      "dependencies": [],
+      "owner": "catminou4",
+      "status": "PR_OPEN",
+      "evidence_class": "D",
+      "issue": 1417,
+      "pr": 1423,
+      "test_status": "PR #1423 reports seven CLI tests on Python 3.9.6 and 3.12.16 at 995a0835, plus six comparisons using three ARM64 registry snapshots and two exact wanted lists. A local comparison against the 38-lot candidate finds six binding changes across ten runtime controls and no changes across the 35 exact GNU shared-package gaps. The seven Python tests passed in the integration tree.",
+      "limitations": "Reports binding deltas for a selected import corpus. Package-local providers and guest execution require separate loader evidence.",
+      "ownership_state": "Ready for integration",
+      "counts_toward_personal_workload": false,
+      "assignment_side": "external"
+    },
+    {
+      "id": "WP-1429",
+      "subsystem": "Runtime",
+      "description": "Release owned Win64 GUID and BLOB values in PropVariantClear",
+      "priority": "P1",
+      "dependencies": [],
+      "owner": "catminou4",
+      "status": "PR_OPEN",
+      "evidence_class": "D",
+      "issue": 1429,
+      "pr": 1434,
+      "test_status": "PR #1434 reports three focused loader tests and the existing string-and-value control at ded5b8f0. The four original AMD64 images cover releases, repeated clear, foreign ownership, unwritable and overlapping descriptors. The original fixture builder reproduced the committed images byte-for-byte in the isolated native ARM64 integration tree.",
+      "limitations": "Covers scalar VT_CLSID and VT_BLOB backed by the COM task heap. Overlap rejection is Xenora policy. Other owned variant forms require separate support.",
+      "ownership_state": "Ready for integration",
+      "counts_toward_personal_workload": false,
+      "assignment_side": "external"
+    },
+    {
+      "id": "WP-1438",
+      "subsystem": "Runtime",
+      "description": "Bind the existing C structured exception handler through VCRUNTIME140",
+      "priority": "P1",
+      "dependencies": [],
+      "owner": "catminou4",
+      "status": "PR_OPEN",
+      "evidence_class": "D",
+      "issue": 1438,
+      "pr": 1441,
+      "test_status": "PR #1441 reports a same-PE pre-entry refusal on a1b69294 and guest status 0 at 05804b77, plus 175 local C SEH and runtime tests. The compiled C guest checks declined and accepting filters, abnormal finally and continuation order. The original fixture builder reproduced the committed images byte-for-byte in the isolated native ARM64 integration tree.",
+      "limitations": "The exact alias inherits the partial UCRT context handler. Microsoft C++ language handlers and the noexcept C export require separate support.",
+      "ownership_state": "Ready for integration",
+      "counts_toward_personal_workload": false,
+      "assignment_side": "external"
+    },
+    {
+      "id": "WP-1393",
+      "subsystem": "Runtime",
+      "description": "Resolve UCRT rand, srand and _time64 imports",
+      "priority": "P1",
+      "dependencies": [],
+      "owner": "catminou4",
+      "status": "PR_OPEN",
+      "evidence_class": "D",
+      "issue": 1393,
+      "pr": 1399,
+      "test_status": "PR #1399 reports local ARM64 execution at e3f0ae57 for two original AMD64 images after baseline import refusal. The fixtures exercise exact UCRT and API-set routes, legacy RNG controls, and the eight-byte injected clock result. The original fixture builder reproduced the committed images byte-for-byte in the isolated native ARM64 integration tree.",
+      "limitations": "Evidence covers the scoped synthetic RNG and wall clock behavior of the open candidate.",
+      "ownership_state": "Ready for integration",
+      "counts_toward_personal_workload": false,
+      "assignment_side": "external"
+    },
+    {
+      "id": "WP-1409",
+      "subsystem": "Runtime",
+      "description": "Bind explicit null-frame AMD64 setjmp and longjmp through VCRUNTIME140",
+      "priority": "P1",
+      "dependencies": [],
+      "owner": "catminou4",
+      "status": "PR_OPEN",
+      "evidence_class": "D",
+      "issue": 1409,
+      "pr": 1413,
+      "test_status": "PR #1413 reports two original guest tests and the legacy C control at c37a3be4. The fixture checks return values 73 and 1, saved register and stack state, and nonzero frame refusals. Baseline refuses the exact imports before entry. The original fixture builder reproduced the committed images byte-for-byte in the isolated native ARM64 integration tree.",
+      "limitations": "The two bindings are partial. SEH-backed frame unwinding, C++ destructors and SEH finally handlers require additional support.",
+      "ownership_state": "Ready for integration",
+      "counts_toward_personal_workload": false,
+      "assignment_side": "external"
     }
   ],
   "ownership_states": {
@@ -2088,8 +2207,8 @@
       "id": "R4",
       "status": "PARTIAL",
       "goal": "Multi-threaded C++ synchronization and thread-local storage",
-      "evidence": "On c8210aaf, the original C++ worker and four Itanium guard regressions passed. The compiled retry after a throw is tracked separately. Merged PR #1283 checks compiler-emitted abort after a throw and a successful retry on a different guest thread. Open PR #1343 verifies compiler-emitted Microsoft x64 accesses on the initial thread. The worker implementation needs coordination with the scheduler and thread-table owners. Draft PR #1360 verifies initial-thread package TLS storage rollback and retry. Two compiled GNU emulated TLS probes on a1b69294 reproduced a missing constant template and state reused across distinct guest worker IDs. Open PR #1398 verifies two simultaneously live workers, separate FLS values, and destructor and heap cleanup at worker return and explicit exit.",
-      "remaining": "Cover blocking guard contention, compiler-emitted worker TLS and C++ language thread-local destructors. Coordinate emulated TLS initialization and retirement with the C++ and scheduler owners.",
+      "evidence": "On c8210aaf, the original C++ worker and four Itanium guard regressions passed. The compiled retry after a throw is tracked separately. Merged PR #1283 checks compiler-emitted abort after a throw and a successful retry on a different guest thread. Open PR #1343 verifies compiler-emitted Microsoft x64 accesses on the initial thread. The worker implementation needs coordination with the scheduler and thread-table owners. Draft PR #1360 verifies initial-thread package TLS storage rollback and retry. Two compiled GNU emulated TLS probes on a1b69294 reproduced a missing constant template and state reused across distinct guest worker IDs. Open PR #1398 verifies two simultaneously live workers, separate FLS values, and destructor and heap cleanup at worker return and explicit exit. Open PR #1451 verifies GCC-emitted dynamic scalar TLS for the initial thread and two overlapping workers. Each worker retains its separate address and value through condition-variable wake and timeout, reacquires the critical section before release, and contributes to the exact five-millisecond synthetic-clock result.",
+      "remaining": "Cover blocking guard contention, worker PE static TLS, nonzero GNU emulated TLS templates, storage retirement and C++ language thread-local destructors. Coordinate the remaining worker storage work with the C++ and scheduler owners.",
       "sources": [
         "https://github.com/ranveersoni98/Xenora/blob/main/crates/loader/tests/guest_cxx_guard_abi.rs",
         "https://github.com/ranveersoni98/Xenora/blob/main/docs/runtime/threads.md",
@@ -2099,14 +2218,15 @@
         "https://github.com/ranveersoni98/Xenora/pull/1360",
         "https://github.com/ranveersoni98/Xenora/pull/312#issuecomment-7243808705",
         "https://github.com/ranveersoni98/Xenora/issues/587",
-        "https://github.com/ranveersoni98/Xenora/pull/1398"
+        "https://github.com/ranveersoni98/Xenora/pull/1398",
+        "https://github.com/ranveersoni98/Xenora/pull/1451"
       ]
     },
     {
       "id": "R5",
       "status": "PARTIAL",
       "goal": "Original exception-handling and unwinding fixture",
-      "evidence": "On c8210aaf, two compiled GNU C++ unwinding tests and twelve compiled C structured exception tests passed. Open PR #1345 verifies the documented RaiseException null argument-array rule using original compiled C filters. Open PR #1370 adds a typed GNU catch and destructor order after unwinding through two independently compiled C DLL frames. The throw, catch and destructors reside in the executable. Open PR #1418 records independent ARM64 runs at two optimization levels for a DLL throw, an EXE catch by const reference and the exact order of both stack guards and the producer-defined exception-object destructor. The same package refuses startup without the installed GNU shared SEH unwinder and succeeds again on fresh replay. Open PR #1431 verifies that a bare rethrow after a nested typed catch preserves the outer exception object and the exact guard and destructor order. Two independent ARM64 runs cover both optimization levels, pre-entry refusal without the shared unwinder and fresh replay.",
+      "evidence": "On c8210aaf, two compiled GNU C++ unwinding tests and twelve compiled C structured exception tests passed. Open PR #1345 verifies the documented RaiseException null argument-array rule using original compiled C filters. Open PR #1370 adds a typed GNU catch and destructor order after unwinding through two independently compiled C DLL frames. The throw, catch and destructors reside in the executable. Open PR #1418 records independent ARM64 runs at two optimization levels for a DLL throw, an EXE catch by const reference and the exact order of both stack guards and the producer-defined exception-object destructor. The same package refuses startup without the installed GNU shared SEH unwinder and succeeds again on fresh replay. Open PR #1431 verifies that a bare rethrow after a nested typed catch preserves the outer exception object and the exact guard and destructor order. Two independent ARM64 runs cover both optimization levels, pre-entry refusal without the shared unwinder and fresh replay. Open PR #1441 reports local execution through the exact VCRUNTIME140 C structured exception handler alias with declined and accepting filters, abnormal finally and continuation.",
       "remaining": "Cover the Microsoft C++ personality, shared C++ and pthread runtime loading, nested exceptions, unsupported records and post-abort cleanup. A separate fully shared GNU package from the installed MinGW-w64 GCC 16.2.0 toolchain failed before entry with 35 unresolved imports.",
       "sources": [
         "https://github.com/ranveersoni98/Xenora/blob/main/docs/research/exception-handling.md",
@@ -2114,21 +2234,23 @@
         "https://github.com/ranveersoni98/Xenora/pull/1345",
         "https://github.com/ranveersoni98/Xenora/pull/1370",
         "https://github.com/ranveersoni98/Xenora/pull/1418",
-        "https://github.com/ranveersoni98/Xenora/pull/1431"
+        "https://github.com/ranveersoni98/Xenora/pull/1431",
+        "https://github.com/ranveersoni98/Xenora/pull/1441"
       ]
     },
     {
       "id": "R6",
       "status": "PARTIAL",
       "goal": "Original COM application with supported object lifecycle",
-      "evidence": "Merged PR #1261 adds opt-in server locks and unload eligibility. Open PRs #1296 and #1324 cover cross-module ownership and simultaneous STA and MTA initialization and lifetime. Open PR #1374 combines same-apartment DLL ownership, a separate worker apartment and balanced factory locking in one original package, including isolated live-object and lock controls. Two independent ARM64 runs passed the fifteen COM and package tests on the combined source tree.",
+      "evidence": "Merged PR #1261 adds opt-in server locks and unload eligibility. Open PRs #1296 and #1324 cover cross-module ownership and simultaneous STA and MTA initialization and lifetime. Open PR #1374 combines same-apartment DLL ownership, a separate worker apartment and balanced factory locking in one original package, including isolated live-object and lock controls. Two independent ARM64 runs passed the fifteen COM and package tests on the combined source tree. Open PR #1434 reports local cleanup of task-owned GUID and BLOB variants, with preserved allocations on the invalid descriptor and ownership controls.",
       "remaining": "Integrate the open COM fixtures and record upstream acceptance of the opt-in synthetic lifecycle.",
       "sources": [
         "https://github.com/ranveersoni98/Xenora/blob/main/docs/runtime/com.md",
         "https://github.com/ranveersoni98/Xenora/pull/1261",
         "https://github.com/ranveersoni98/Xenora/pull/1296",
         "https://github.com/ranveersoni98/Xenora/pull/1324",
-        "https://github.com/ranveersoni98/Xenora/pull/1374"
+        "https://github.com/ranveersoni98/Xenora/pull/1374",
+        "https://github.com/ranveersoni98/Xenora/pull/1434"
       ]
     },
     {
@@ -2183,6 +2305,15 @@
     }
   ],
   "runtime_service_evidence": [
+    {
+      "library": "kernel32.dll",
+      "kind": "name",
+      "symbol": "WriteConsoleOutputA",
+      "evidence_class": "D",
+      "evidence": "At both optimization levels the compiled baseline exits 14 after ANSI write and wide readback. The candidate verifies the one-byte character member, separate 16-bit attributes, a wide U+03A9 control cell and clipping at the caller-buffer edge in the existing screen model.",
+      "source": "https://learn.microsoft.com/en-us/windows/console/char-info-str",
+      "witness": "https://github.com/ranveersoni98/Xenora/pull/1450"
+    },
     {
       "library": "kernel32.dll",
       "kind": "name",

@@ -787,10 +787,13 @@ together, so both names resolve in each.
 them. Nothing was compared with Windows.
 
 The UCRT and `api-ms-win-crt-runtime-l1-1-0.dll` provide
-`_get_narrow_winmain_command_line`. It returns a pointer into the same
-allocation as `GetCommandLineA`, beginning after the executable name and
-its separator. The tail preserves the serialized quoting and UTF-8 bytes.
-It points at the terminating NUL when there are no arguments.
+`_get_narrow_winmain_command_line` and `_get_wide_winmain_command_line`.
+Each returns a pointer into the corresponding `GetCommandLineA` or
+`GetCommandLineW` allocation after the executable name and its separator.
+The tails preserve the serialized quoting and the original UTF-8 bytes or
+UTF-16 code units. The pointer addresses the terminating NUL when there
+are no arguments. The helpers have partial status for the synthetic
+startup environment.
 
 ### XInput controller state
 

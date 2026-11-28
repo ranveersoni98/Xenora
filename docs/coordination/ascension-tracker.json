@@ -2219,9 +2219,26 @@
       "evidence_class": "D",
       "issue": 1459,
       "pr": null,
-      "test_status": "On a1b69294, original -O1 and -O2 guests using direct pthread_once or std::call_once with the installed shared libgcc each exited 51. The contending thread read zero before the initializer’s explicit release and publication of 42. The standalone C++ variants refused libgcc_s_seh-1.dll!_GCC_specific_handler before entry when the unwinder was omitted.",
+      "test_status": "On a1b69294, original -O1 and -O2 guests using direct pthread_once or std::call_once with the installed shared libgcc each exited 51. The contending thread read zero before the initializer’s explicit release and publication of 42. The standalone C++ variants refused libgcc_s_seh-1.dll!_GCC_specific_handler before entry when the unwinder was omitted. Two native rebuilds agreed across all six startup and ordering cases.",
       "limitations": "Open PR #535 owns static_cxx.rs. The wait and wake implementation awaits coordination.",
       "ownership_state": "Awaiting external dependency",
+      "counts_toward_personal_workload": false,
+      "assignment_side": "external"
+    },
+    {
+      "id": "WP-1470",
+      "subsystem": "Runtime",
+      "description": "Query the owning guest process of a thread handle",
+      "priority": "P1",
+      "dependencies": [],
+      "owner": "catminou4",
+      "status": "PR_OPEN",
+      "evidence_class": "D",
+      "issue": 1470,
+      "pr": 1473,
+      "test_status": "Two independent native ARM64 runs at d6c7207f passed the original -O1 and -O2 guests. Both check exact Kernel32 import, distinct configured process IDs, both query rights, live and retained joined worker handles, and wait-only and invalid-handle errors. Both original guests refuse the exact missing import before entry on the baseline. The 84-test runtime thread suite also passed locally.",
+      "limitations": "Models handles for the calling guest process. Local generated inventory has one new partial binding. The committed reports are coordinated under #1285.",
+      "ownership_state": "Ready for integration",
       "counts_toward_personal_workload": false,
       "assignment_side": "external"
     }
@@ -2294,7 +2311,7 @@
       "id": "R4",
       "status": "PARTIAL",
       "goal": "Multi-threaded C++ synchronization and thread-local storage",
-      "evidence": "On c8210aaf, the original C++ worker and four Itanium guard regressions passed. The compiled retry after a throw is tracked separately. Merged PR #1283 checks compiler-emitted abort after a throw and a successful retry on a different guest thread. Open PR #1343 verifies compiler-emitted Microsoft x64 accesses on the initial thread. The worker implementation needs coordination with the scheduler and thread-table owners. Draft PR #1360 verifies initial-thread package TLS storage rollback and retry. Two compiled GNU emulated TLS probes on a1b69294 reproduced a missing constant template and state reused across distinct guest worker IDs. Open PR #1398 verifies two simultaneously live workers, separate FLS values, and destructor and heap cleanup at worker return and explicit exit. Open PR #1451 verifies GCC-emitted dynamic scalar TLS for the initial thread and two overlapping workers. Each worker retains its separate address and value through condition-variable wake and timeout, reacquires the critical section before release, and contributes to the exact five-millisecond synthetic-clock result. Issue #1459 records that a second worker returns from GNU once too early. Direct pthread_once and hosted std::call_once with the packaged shared unwinder both read zero before the explicit release in two compiled variants. PR #535 owns the affected source.",
+      "evidence": "On c8210aaf, the original C++ worker and four Itanium guard regressions passed. The compiled retry after a throw is tracked separately. Merged PR #1283 checks compiler-emitted abort after a throw and a successful retry on a different guest thread. Open PR #1343 verifies compiler-emitted Microsoft x64 accesses on the initial thread. The worker implementation needs coordination with the scheduler and thread-table owners. Draft PR #1360 verifies initial-thread package TLS storage rollback and retry. Two compiled GNU emulated TLS probes on a1b69294 reproduced a missing constant template and state reused across distinct guest worker IDs. Open PR #1398 verifies two simultaneously live workers, separate FLS values, and destructor and heap cleanup at worker return and explicit exit. Open PR #1451 verifies GCC-emitted dynamic scalar TLS for the initial thread and two overlapping workers. Each worker retains its separate address and value through condition-variable wake and timeout, reacquires the critical section before release, and contributes to the exact five-millisecond synthetic-clock result. Issue #1459 records that a second worker returns from GNU once too early. Direct pthread_once and hosted std::call_once with the packaged shared unwinder both read zero before the explicit release in two compiled variants. PR #535 owns the affected source. Open PR #1473 verifies owning-process lookup, rights and retained handles on an original live worker. The modeled identity is local to the current guest.",
       "remaining": "Cover blocking guard contention, worker PE static TLS, nonzero GNU emulated TLS templates, storage retirement and C++ language thread-local destructors. Coordinate the remaining worker storage work with the C++ and scheduler owners.",
       "sources": [
         "https://github.com/ranveersoni98/Xenora/blob/main/crates/loader/tests/guest_cxx_guard_abi.rs",
@@ -2307,7 +2324,8 @@
         "https://github.com/ranveersoni98/Xenora/issues/587",
         "https://github.com/ranveersoni98/Xenora/pull/1398",
         "https://github.com/ranveersoni98/Xenora/pull/1451",
-        "https://github.com/ranveersoni98/Xenora/issues/1459"
+        "https://github.com/ranveersoni98/Xenora/issues/1459",
+        "https://github.com/ranveersoni98/Xenora/pull/1473"
       ]
     },
     {

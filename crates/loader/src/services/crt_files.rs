@@ -27,6 +27,8 @@ use std::collections::BTreeMap;
 /// errno.h values.
 pub(super) const ENOENT: u32 = 2;
 pub(super) const EBADF: u32 = 9;
+/// The CRT's broken pipe error, the value the Windows CRT documents.
+pub(super) const EPIPE: u32 = 32;
 /// A wide character the C locale cannot write.
 pub(super) const EILSEQ: u32 = 42;
 pub(super) const ENOMEM: u32 = 12;
@@ -972,10 +974,13 @@ impl FileStreams {
                 && matches!(drive.handles.get(&handle), Some(GuestObject::Pipe { .. }))
                 && drive.pipe_ref_release(handle)
             {
-                if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle)
-                    && *write
-                {
-                    state.lock().expect("pipe state").write_open = false;
+                if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle) {
+                    let mut pipe = state.lock().expect("pipe state");
+                    if *write {
+                        pipe.write_open = false;
+                    } else {
+                        pipe.read_open = false;
+                    }
                 }
                 drive.handles.remove(&handle);
             }
@@ -1005,6 +1010,7 @@ impl FileStreams {
         let shared =
             std::sync::Arc::new(std::sync::Mutex::new(crate::services::files::PipeState {
                 write_open: true,
+                read_open: true,
                 ..crate::services::files::PipeState::default()
             }));
         let Some(read_handle) = drive.next_handle() else {
@@ -1576,9 +1582,13 @@ impl FileStreams {
                     // stream, as CloseHandle makes it.
                     if drive.pipe_ref_release(handle) {
                         if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle)
-                            && *write
                         {
-                            state.lock().expect("pipe state").write_open = false;
+                            let mut pipe = state.lock().expect("pipe state");
+                            if *write {
+                                pipe.write_open = false;
+                            } else {
+                                pipe.read_open = false;
+                            }
                         }
                         drive.handles.remove(&handle);
                     }
@@ -1743,6 +1753,9 @@ fn handle_write(drive: &mut super::ObjectState, handle: u64, bytes: &[u8]) -> Re
                 return Err(EACCES);
             }
             let mut pipe = state.lock().expect("pipe state");
+            if !pipe.read_open {
+                return Err(EPIPE);
+            }
             if pipe.buffer.len() + bytes.len() > PIPE_CAP {
                 return Err(ENOSPC);
             }
@@ -1778,7 +1791,7 @@ fn handle_write(drive: &mut super::ObjectState, handle: u64, bytes: &[u8]) -> Re
 #[cfg(test)]
 mod tests {
     use super::super::ObjectState;
-    use super::{EBADF, EDEADLOCK, EINVAL, FileStreams, parse_mode};
+    use super::{EBADF, EDEADLOCK, EINVAL, EPIPE, FileStreams, parse_mode};
     use crate::memory::GuestMemory;
 
     /// The object `fopen` returns spans the legacy CRT's 48-byte `_iobuf`,
@@ -1811,6 +1824,35 @@ mod tests {
             .write_u32(file + 8, 1)
             .expect("the macro decrement must be writable");
         assert_eq!(memory.read_u32(file + 8).expect("read"), 1);
+    }
+
+    /// A write to a pipe whose read end is gone fails broken exactly as it
+    /// does on Windows: the end-of-stream direction was already tracked for
+    /// readers, and the read side now mirrors it for writers (#1471).
+    #[test]
+    fn pipe_writes_break_once_the_last_reader_closes() {
+        let mut streams = FileStreams::default();
+        let mut drive = ObjectState::default();
+        let (read_fd, write_fd) = streams.pipe_create(&mut drive).expect("pipe");
+        assert_eq!(
+            streams.descriptor_write(&mut drive, write_fd, b"abc"),
+            Ok(())
+        );
+        // The reader still holds its end: writes keep landing in the buffer.
+        assert_eq!(streams.descriptor_write(&mut drive, write_fd, b"d"), Ok(()));
+        let mut memory = GuestMemory::new();
+        assert!(streams.descriptor_close(&mut memory, &mut drive, read_fd));
+        assert_eq!(
+            streams.descriptor_write(&mut drive, write_fd, b"x"),
+            Err(EPIPE)
+        );
+        // Zero-length writes are the probe the CRT itself uses: they break
+        // against the same check rather than reporting success on a pipe no
+        // one can ever drain.
+        assert_eq!(
+            streams.descriptor_write(&mut drive, write_fd, b""),
+            Err(EPIPE)
+        );
     }
 
     /// `_locking` holds exclusive byte ranges of the stream at its position:

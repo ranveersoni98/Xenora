@@ -1577,6 +1577,7 @@ pub(crate) mod handlers {
         }
         let state_shared = std::sync::Arc::new(std::sync::Mutex::new(files::PipeState {
             write_open: true,
+            read_open: true,
             ..files::PipeState::default()
         }));
         let mut objects = context.state.objects.lock().expect("guest object state");
@@ -1632,10 +1633,13 @@ pub(crate) mod handlers {
         let removed = if is_pipe && !objects.pipe_ref_release(handle) {
             None
         } else {
-            if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle)
-                && *write
-            {
-                state.lock().expect("pipe state").write_open = false;
+            if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle) {
+                let mut pipe = state.lock().expect("pipe state");
+                if *write {
+                    pipe.write_open = false;
+                } else {
+                    pipe.read_open = false;
+                }
             }
             objects.handles.remove(&handle)
         };

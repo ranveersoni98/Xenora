@@ -8,6 +8,7 @@ exact revision and known limitations.
 
 ### Fixed
 
+- Anonymous pipe writes now fail broken once the last reference to the read end closes anywhere, mirroring the writer-liveness tracking readers already had: the kernel surface answers ERROR_BROKEN_PIPE and the CRT write answers EPIPE instead of buffering forever, matching how a Windows writer learns its reader is gone. Pipelines whose producer is still running when the consumer exits additionally need interleaved child execution, which the runtime does not have yet (#1471).
 - CRT heap allocations now commit page-granular memory while reporting exact requested sizes, reproducing the Windows CRT heap's arena slack: small-object adjacent reads that the mingw CRT stdio macros rely on complete instead of faulting, which repairs `diff` end-to-end on differing files (it previously died with a guest access violation); zero-length allocations keep their zero-length marker behaviour, and same-page growth is a pure in-place size change (#1421).
 
 ### Added

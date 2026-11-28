@@ -1842,6 +1842,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                     if count == 0 {
                         0
                     } else {
+                        if !pipe.read_open {
+                            return state.fail(cpu.gs_base, 109, 0); // ERROR_BROKEN_PIPE
+                        }
                         if pipe.buffer.len() + count > MAX_BYTES {
                             return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
                         }
@@ -2565,6 +2568,11 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 pub(super) struct PipeState {
     pub buffer: std::collections::VecDeque<u8>,
     pub write_open: bool,
+    /// The mirror of `write_open` on the read side: once the last reference
+    /// to the read end closes anywhere, writes fail broken instead of
+    /// buffering forever, exactly as ERROR_BROKEN_PIPE reaches a Windows
+    /// writer whose reader is gone.
+    pub read_open: bool,
 }
 
 /// What a path names on the drive, for the C runtime's file streams.

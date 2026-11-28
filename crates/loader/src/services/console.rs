@@ -389,14 +389,14 @@ pub(super) fn register(registry: &mut crate::imports::ImportRegistry, state: &Ar
         },
     );
 
-    // The A/W variants share a four-byte CHAR_INFO layout. Intersect the
-    // screen rectangle with the caller-buffer extent translated into screen
-    // coordinates, keeping the origin of the requested rectangle for indexing.
-    for (symbol, to_screen) in [
-        ("WriteConsoleOutputW", true),
-        ("WriteConsoleOutputA", true),
-        ("ReadConsoleOutputW", false),
-        ("ReadConsoleOutputA", false),
+    // The A/W variants share a four-byte CHAR_INFO layout, with a one-byte
+    // character for ANSI writes. Intersect the screen and caller-buffer
+    // rectangles, keeping the requested rectangle's origin for indexing.
+    for (symbol, to_screen, ansi_write) in [
+        ("WriteConsoleOutputW", true, false),
+        ("WriteConsoleOutputA", true, true),
+        ("ReadConsoleOutputW", false, false),
+        ("ReadConsoleOutputA", false, false),
     ] {
         let state = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, cpu, memory| {
@@ -446,7 +446,11 @@ pub(super) fn register(registry: &mut crate::imports::ImportRegistry, state: &Ar
                         let cell = &mut buffer.cells[(row * screen_width + column) as usize];
                         if to_screen {
                             let packed = memory.read_u32(addr).map_err(ExitReason::MemoryFault)?;
-                            cell.ch = packed as u16;
+                            cell.ch = if ansi_write {
+                                u16::from(packed as u8)
+                            } else {
+                                packed as u16
+                            };
                             cell.attr = (packed >> 16) as u16;
                         } else {
                             let packed = u32::from(cell.ch) | (u32::from(cell.attr) << 16);

@@ -1185,19 +1185,15 @@ fn xenora_readback_resource(
         resource,
         memory,
         GraphicsError::InvalidResourceHandle,
-        |resource_handle| {
-            let bytes = graphics.resource_bytes(resource_handle)?;
-            Ok(bytes.to_vec())
-        },
+        |resource_handle| graphics.resource_bytes(resource_handle),
     ) {
         Ok(bytes) => bytes,
         Err(error) => return Ok(hresult(&error)),
     };
-    let count = byte_length.min(bytes.len());
-    if count == 0 {
+    let Some(requested) = bytes.get(..byte_length).filter(|bytes| !bytes.is_empty()) else {
         return Ok(invalid_arg());
-    }
-    if memory.write_bytes(guest_addr, &bytes[..count]).is_err() {
+    };
+    if memory.write_bytes(guest_addr, requested).is_err() {
         return Ok(invalid_arg());
     }
     Ok(ok())

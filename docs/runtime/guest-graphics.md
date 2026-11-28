@@ -61,7 +61,7 @@ before creating the object.
 | `XenoraDrawIndexed` | `list`, `indexCount`, `instanceCount`, `startIndexBase` | Records an indexed draw. `startIndexBase` packs `startIndex` in the low 32 bits and a sign-extended 16-bit `baseVertex` in the high 32 bits. |
 | `XenoraCloseCommandList` | `list` | Ends recording so the list can be executed. |
 | `XenoraExecuteCommandLists` | `queue`, `list` | Executes a closed list. The rendered pixels are written into the bound render target. |
-| `XenoraReadbackResource` | `resource`, `guestAddr`, `byteLength` | Copies `byteLength` bytes of a resource into guest memory at `guestAddr`. |
+| `XenoraReadbackResource` | `resource`, `guestAddr`, `byteLength` | Copies exactly `byteLength` bytes from the start of a resource into guest memory at `guestAddr`. A zero length, a length beyond the resource, or an unwritable output span returns `E_INVALIDARG` without writing bytes. |
 | `XenoraGetLastFrameInfo` | `ppInfo` | Writes four `u32`s: backend, width, height, draw count. |
 | `XenoraCreateDescriptorHeap` | `device`, `heapType`, `numDescriptors`, `ppHeap` | Creates a descriptor heap. `heapType` is `0` (`CBV_SRV_UAV`) or `1` (`SAMPLER`). |
 | `XenoraCreateShaderResourceView` | `device`, `heap`, `slot`, `resource`, `format` | Writes a shader resource view over `resource` into the heap slot. The format must equal the resource's. |

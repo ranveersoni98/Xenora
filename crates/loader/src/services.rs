@@ -336,7 +336,6 @@ pub struct ServicesState {
     synch: Mutex<synch::Synch>,
     crt_streams: Mutex<crt_streams::StandardStreams>,
     crt_clock: Mutex<crt_clock::ClockServices>,
-    crt_directory: Mutex<String>,
     pub(crate) threads: Mutex<threads::ThreadTable>,
     pub(crate) hooks: Arc<threads::SchedulerHooks>,
     /// Functions registered with `atexit`, run in reverse order by `_cexit`.
@@ -449,7 +448,6 @@ impl ServicesState {
             synch: Mutex::default(),
             crt_streams: Mutex::default(),
             crt_clock: Mutex::default(),
-            crt_directory: Mutex::new(String::new()),
             console: Mutex::default(),
             com: Mutex::default(),
             com_fixture: Mutex::default(),
@@ -624,12 +622,6 @@ impl ServicesState {
         // files the parent wrote are visible to the child and vice versa.
         Arc::new(ServicesState {
             objects: Arc::clone(&self.objects),
-            crt_directory: Mutex::new(
-                self.crt_directory
-                    .lock()
-                    .expect("current directory")
-                    .clone(),
-            ),
             environment: Mutex::new(
                 self.environment
                     .lock()
@@ -1585,6 +1577,7 @@ pub(crate) mod handlers {
         }
         let state_shared = std::sync::Arc::new(std::sync::Mutex::new(files::PipeState {
             write_open: true,
+            read_open: true,
             ..files::PipeState::default()
         }));
         let mut objects = context.state.objects.lock().expect("guest object state");
@@ -1640,10 +1633,13 @@ pub(crate) mod handlers {
         let removed = if is_pipe && !objects.pipe_ref_release(handle) {
             None
         } else {
-            if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle)
-                && *write
-            {
-                state.lock().expect("pipe state").write_open = false;
+            if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle) {
+                let mut pipe = state.lock().expect("pipe state");
+                if *write {
+                    pipe.write_open = false;
+                } else {
+                    pipe.read_open = false;
+                }
             }
             objects.handles.remove(&handle)
         };
@@ -1997,10 +1993,14 @@ pub(crate) mod handlers {
     }
 
     pub fn fopen(context: &mut ServiceContext<'_>, name: u64, mode: u64) -> Outcome<u64> {
+        let default_binary = context
+            .state
+            .crt_startup()
+            .file_mode_binary(context.memory)?;
         let outcome = {
             let mut streams = context.state.crt_streams();
             let mut drive = context.state.objects.lock().expect("guest object state");
-            streams.open(context.memory, &mut drive, name, mode)
+            streams.open(context.memory, &mut drive, name, mode, default_binary)
         };
         or_errno(context, outcome)
     }
@@ -2154,10 +2154,20 @@ pub(crate) mod handlers {
         mode: i32,
     ) -> Outcome<i32> {
         let _ = mode;
+        let default_binary = context
+            .state
+            .crt_startup()
+            .file_mode_binary(context.memory)?;
         let outcome = {
             let mut streams = context.state.crt_streams();
             let mut drive = context.state.objects.lock().expect("guest object state");
-            streams.open_descriptor(context.memory, &mut drive, name, flags as u32)
+            streams.open_descriptor(
+                context.memory,
+                &mut drive,
+                name,
+                flags as u32,
+                default_binary,
+            )
         };
         or_errno(context, outcome)
     }
@@ -2270,10 +2280,14 @@ pub(crate) mod handlers {
     }
 
     pub fn _wfopen(context: &mut ServiceContext<'_>, name: u64, mode: u64) -> Outcome<u64> {
+        let default_binary = context
+            .state
+            .crt_startup()
+            .file_mode_binary(context.memory)?;
         let outcome = {
             let mut streams = context.state.crt_streams();
             let mut drive = context.state.objects.lock().expect("guest object state");
-            streams.open_wide(context.memory, &mut drive, name, mode)
+            streams.open_wide(context.memory, &mut drive, name, mode, default_binary)
         };
         or_errno(context, outcome)
     }
@@ -2421,9 +2435,10 @@ pub(crate) mod handlers {
     pub fn _mkdir(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
         let bytes =
             crt_streams::c_string(context.memory, name, 260).map_err(ExitReason::MemoryFault)?;
+        let resolved = context.state.crt_streams().resolve_path(&bytes);
         let outcome = {
             let mut drive = context.state.objects.lock().expect("guest object state");
-            match ObjectState::drive_path(&bytes) {
+            match resolved {
                 Some(path) => drive
                     .drive_mkdir(&path)
                     .map(|()| 0)
@@ -2437,9 +2452,10 @@ pub(crate) mod handlers {
     pub fn _rmdir(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
         let bytes =
             crt_streams::c_string(context.memory, name, 260).map_err(ExitReason::MemoryFault)?;
+        let resolved = context.state.crt_streams().resolve_path(&bytes);
         let outcome = {
             let mut drive = context.state.objects.lock().expect("guest object state");
-            match ObjectState::drive_path(&bytes) {
+            match resolved {
                 Some(path) => drive
                     .drive_rmdir(&path)
                     .map(|()| 0)
@@ -2469,10 +2485,14 @@ pub(crate) mod handlers {
 
     pub fn _creat(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
         let _ = mode;
+        let default_binary = context
+            .state
+            .crt_startup()
+            .file_mode_binary(context.memory)?;
         let outcome = {
             let mut streams = context.state.crt_streams();
             let mut drive = context.state.objects.lock().expect("guest object state");
-            streams.create_descriptor(context.memory, &mut drive, name)
+            streams.create_descriptor(context.memory, &mut drive, name, default_binary)
         };
         or_errno(context, outcome)
     }
@@ -2548,9 +2568,14 @@ pub(crate) mod handlers {
     }
 
     /// `_get_osfhandle`. The kernel handle a descriptor wraps, or -1 with
-    /// `EBADF` — the CRT's own files have no kernel object behind them.
+    /// `EBADF` for one that is no file at all. A CRT-opened file answers
+    /// the kernel object the real CRT always has behind its descriptors,
+    /// synthesized the first time a guest asks (#1312).
     pub fn _get_osfhandle(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<u64> {
-        let outcome = context.state.crt_streams().get_osfhandle(fd);
+        let outcome = {
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            context.state.crt_streams().get_osfhandle(&mut drive, fd)
+        };
         or_errno(context, outcome)
     }
 
@@ -2595,10 +2620,14 @@ pub(crate) mod handlers {
         name: u64,
         mode: u64,
     ) -> Outcome<i32> {
+        let default_binary = context
+            .state
+            .crt_startup()
+            .file_mode_binary(context.memory)?;
         let outcome = {
             let mut streams = context.state.crt_streams();
             let mut drive = context.state.objects.lock().expect("guest object state");
-            streams.open_secure(context.memory, &mut drive, file, name, mode)
+            streams.open_secure(context.memory, &mut drive, file, name, mode, default_binary)
         };
         or_errno(context, outcome)
     }

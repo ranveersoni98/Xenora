@@ -3534,9 +3534,27 @@ fn open_streams_are_bounded_and_fclose_releases_them() {
     }
     let (_, exit) = print_with(&mut guest, MINGW_OPTIONS, again, b"x", &[]);
     assert_eq!(exit, LIMIT);
-    for stream in [input, out, err, TEXT] {
-        assert_eq!(guest.run("fclose", &[stream]).1, LIMIT, "{stream:#x}");
+    // Closing a standard stream is legal: the CRT does not reserve them on
+    // Windows. awk closes its input when stdin reaches EOF before exit, and
+    // the close marks the descriptor exactly as `_close` of it does (#1273).
+    for stream in [input, out, err] {
+        assert_eq!(
+            guest.call("fclose", &[stream]) & 0xFFFF_FFFF,
+            0,
+            "{stream:#x}"
+        );
     }
+    // A second close has nothing to close, and no stream at all stays no
+    // stream.
+    for stream in [input, out, err] {
+        assert_eq!(
+            guest.call("fclose", &[stream]) & 0xFFFF_FFFF,
+            STDIO_MINUS_ONE,
+            "{stream:#x}"
+        );
+    }
+    assert_eq!(guest.run("fclose", &[TEXT]).1, LIMIT);
+    guest.set_errno(0);
     for stream in open_streams {
         close(&mut guest, stream);
     }
@@ -7962,6 +7980,103 @@ fn legacy_fstat64_fills_the_legacy_structure() {
     assert_eq!(guest.errno(), EINVAL);
 }
 
+/// `_fmode` controls the default translation of `_open`, exactly as the
+/// CRT documents: an open whose flags say neither `_O_BINARY` nor `_O_TEXT`
+/// translates newlines when the variable is text and not when it is binary
+/// (#1312). busybox-w32 links the binary default into the CRT cell at
+/// startup, and the exact-size copies of its `tar` depend on the byte
+/// counts matching. The control case pins the initial text default, so the
+/// pair proves the variable itself acts.
+#[test]
+fn fmode_controls_the_default_translation_of_open() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[0x100]);
+    let write_two = |guest: &mut Guest, name: &[u8]| {
+        guest.memory.write_bytes(buf, name).unwrap();
+        guest.memory.write_u8(buf + name.len() as u64, 0).unwrap();
+        let fd = guest.call("_open", &[buf, 1 | 0x100 | 0x200, 0]) & 0xFFFF_FFFF;
+        assert!((3..0x8000).contains(&fd), "{fd:x}");
+        guest.memory.write_bytes(buf + 32, b"x\n").unwrap();
+        assert_eq!(guest.call("_write", &[fd, buf + 32, 2]) & 0xFFFF_FFFF, 2);
+        assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    };
+    let raw_len = |guest: &mut Guest, name: &[u8]| -> u64 {
+        // Reading the file back through an explicitly binary descriptor
+        // counts the bytes the drive really carries.
+        guest.memory.write_bytes(buf, name).unwrap();
+        guest.memory.write_u8(buf + name.len() as u64, 0).unwrap();
+        let fd = guest.call("_open", &[buf, 0 | 0x8000, 0]) & 0xFFFF_FFFF;
+        assert!((3..0x8000).contains(&fd), "{fd:x}");
+        let mut total = 0;
+        loop {
+            let n = guest.call("_read", &[fd, buf + 32, 16]) & 0xFFFF_FFFF;
+            if n == 0 || n == MINUS_ONE {
+                break;
+            }
+            total += n;
+        }
+        total
+    };
+    // The documented initial value is text: the newline pair grows a CR.
+    write_two(&mut guest, b"tm1.bin");
+    assert_eq!(
+        raw_len(&mut guest, b"tm1.bin"),
+        3,
+        "text default translates"
+    );
+    // Binary selected: the same open writes the bytes exactly.
+    let mode_ptr = guest.call("__p__fmode", &[]);
+    assert_ne!(mode_ptr, 0);
+    guest.memory.write_u32(mode_ptr, 0x8000).unwrap();
+    write_two(&mut guest, b"tm2.bin");
+    assert_eq!(
+        raw_len(&mut guest, b"tm2.bin"),
+        2,
+        "binary default is exact"
+    );
+    // An explicit `_O_BINARY` flag overrides even a text variable, and an
+    // explicit `_O_TEXT` overrides a binary one.
+    guest.memory.write_u32(mode_ptr, 0x4000).unwrap();
+    guest.memory.write_bytes(buf, b"tm3.bin\0").unwrap();
+    let fd = guest.call("_open", &[buf, 1 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    guest.memory.write_bytes(buf + 32, b"x\n").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf + 32, 2]) & 0xFFFF_FFFF, 2);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    assert_eq!(raw_len(&mut guest, b"tm3.bin"), 2, "the flag wins");
+}
+
+/// `_fstat64` of a pipe end answers the FIFO mode, as the CRT stats an
+/// anonymous pipe: busybox-w32's `tar cf -` stats its standard output to
+/// refuse a terminal, and the failure killed archive creation before any
+/// byte moved. A handle-wrapped file answers the regular-file mode and the
+/// content's length, exactly as a CRT-opened one does.
+#[test]
+fn legacy_fstat64_stats_pipe_ends_and_handle_wrapped_files() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    let stat = guest.call("malloc", &[64]);
+    let fds = guest.call("malloc", &[16]);
+    assert_eq!(guest.call("_pipe", &[fds, 4096, 0]) & 0xFFFF_FFFF, 0);
+    let read = guest.memory.read_u32(fds).unwrap() as u64;
+    let write = guest.memory.read_u32(fds + 4).unwrap() as u64;
+    for fd in [read, write] {
+        assert_eq!(guest.call("_fstat64", &[fd, stat]) & 0xFFFF_FFFF, 0);
+        assert_eq!(
+            guest.memory.read_u16(stat + 6).unwrap() & 0xF000,
+            0x1000,
+            "pipe ends answer the FIFO mode"
+        );
+    }
+    // A file opened through the descriptor table keeps the regular mode.
+    guest.memory.write_bytes(buf, b"hf.bin\0").unwrap();
+    let fd = guest.call("_open", &[buf, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    guest.memory.write_bytes(buf + 16, b"abc").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf + 16, 3]) & 0xFFFF_FFFF, 3);
+    assert_eq!(guest.call("_fstat64", &[fd, stat]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.memory.read_u16(stat + 6).unwrap() & 0xF000, 0x8000);
+    assert_eq!(guest.memory.read_u64(stat + 24).unwrap(), 3);
+}
+
 #[test]
 fn legacy_directories_are_made_and_removed() {
     let mut guest = Guest::new();
@@ -8495,6 +8610,39 @@ fn osfhandle_interop_wraps_a_kernel_pipe() {
     assert_eq!(&verify[..2], b"e!");
     assert_eq!(guest.call("_read", &[fd_r, buf, 8]) & 0xFFFF_FFFF, 0);
     assert_eq!(guest.call("_close", &[fd_r]) & 0xFFFF_FFFF, 0);
+}
+
+/// `_get_osfhandle` of a CRT-opened file answers the kernel file object
+/// the real CRT always has behind its descriptors (#1312): the object
+/// types as a disk file and reports the content's length, exactly the
+/// chain a win32 compatibility layer implements its `fstat` through.
+/// busybox-w32 opens everything this way, and its `tar` died inside the
+/// stat of its own archive before the synthesis existed.
+#[test]
+fn osfhandle_of_a_crt_file_types_and_sizes_as_the_file() {
+    let (mut guest, _) = stdio_guest();
+    let buf = guest.call("malloc", &[0x100]);
+    let stat = guest.call("malloc", &[0x100]);
+    guest.memory.write_bytes(buf, b"of.bin ").unwrap();
+    let fd = guest.call("_open", &[buf, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    guest.memory.write_bytes(buf + 16, b"12345").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf + 16, 5]) & 0xFFFF_FFFF, 5);
+    // The kernel handle exists: before the synthesis every CRT-opened
+    // file answered -1 with EBADF here. The kernel-side type and size
+    // chain (GetFileType answering disk, the by-handle information
+    // carrying the length) is what the end-to-end measurement exercises;
+    // those kernel services do not sit in this harness's table.
+    let handle = guest.call("_get_osfhandle", &[fd]);
+    assert_ne!(handle, u64::MAX);
+    assert_ne!(handle, 0);
+    assert_eq!(guest.errno(), 0);
+    // Asking again answers the same object, and a descriptor that is not
+    // open still answers -1 with EBADF.
+    assert_eq!(guest.call("_get_osfhandle", &[fd]), handle);
+    guest.set_errno(0);
+    assert_eq!(guest.call("_get_osfhandle", &[77]), u64::MAX);
+    assert_eq!(guest.errno(), EBADF);
 }
 
 /// `_filbuf` and `_flsbuf`: the legacy single-byte forms move one byte at

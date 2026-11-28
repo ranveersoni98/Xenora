@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 
 /// `_O_TEXT` (fcntl.h), the documented initial value of `_fmode`.
 const O_TEXT: u32 = 0x4000;
+/// `_O_BINARY` (fcntl.h), the other value `_fmode` honors.
+const O_BINARY: u32 = 0x8000;
 /// `_ENABLE_PER_THREAD_LOCALE` and `_DISABLE_PER_THREAD_LOCALE` (locale.h).
 const ENABLE_PER_THREAD_LOCALE: i32 = 1;
 const DISABLE_PER_THREAD_LOCALE: i32 = 2;
@@ -110,6 +112,22 @@ impl CrtStartup {
             }
         };
         Ok(base + 4 * index)
+    }
+
+    /// Whether `_fmode` currently selects binary translation: the default
+    /// mode of `_open` and `fopen` when their own flags say neither text
+    /// nor binary, exactly as the CRT consults the variable. The cell is
+    /// the guest's - a binary that links binmode or assigns the variable at
+    /// startup, as busybox-w32 does, writes it before any file is opened.
+    pub(super) fn file_mode_binary(
+        &mut self,
+        memory: &mut GuestMemory,
+    ) -> Result<bool, ExitReason> {
+        let address = self.file_mode_address(memory, 0)?;
+        memory
+            .read_u32(address)
+            .map(|mode| mode == O_BINARY)
+            .map_err(ExitReason::MemoryFault)
     }
 
     /// Guest address of `_timezone`, allocated from the process heap on first

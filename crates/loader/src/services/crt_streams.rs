@@ -100,6 +100,13 @@ pub(super) struct StandardStreams {
     /// streams: 0 unoriented, 1 byte, 2 wide.
     output_orientation: u8,
     error_orientation: u8,
+    /// The process working directory, in the drive's lowercase
+    /// backslash-separated key form with the empty string as the volume
+    /// root. One process owns one, exactly as Windows shares the current
+    /// directory between the CRT and the kernel file surface: `_chdir`
+    /// moves it, a spawned child inherits a copy of it, and relative file
+    /// paths resolve against it (#1336).
+    cwd: String,
 }
 
 /// The standard input: bytes the host supplied before the run, after the
@@ -197,43 +204,51 @@ pub(super) fn fault(error: MemoryError) -> ExitReason {
 }
 
 /// The bytes of the C string at `address`, without its terminator.
-/// A file name argument as the drive stores it. `None` for a null pointer
-/// or a name longer than `MAX_PATH`; `Some(None)` for a name the drive
-/// rejects. A name that cannot be read stops the guest with a fault.
-fn drive_name(memory: &GuestMemory, name: u64) -> Result<Option<Option<String>>, ExitReason> {
-    if name == 0 {
-        return Ok(None);
-    }
-    let bytes = c_string(memory, name, MAX_NAME + 1).map_err(fault)?;
-    if bytes.is_empty() || bytes.len() as u64 > MAX_NAME {
-        return Ok(None);
-    }
-    Ok(Some(ObjectState::drive_path(&bytes)))
-}
-
-/// The wide form of `drive_name`: the CRT wide file services take UTF-16
-/// names. The drive's names are ASCII, so a name with a character beyond
-/// ASCII is one the drive rejects, as a rejected narrow name is.
-fn drive_name_wide(memory: &GuestMemory, name: u64) -> Result<Option<Option<String>>, ExitReason> {
-    if name == 0 {
-        return Ok(None);
-    }
-    let mut units = Vec::new();
-    for index in 0..MAX_NAME + 1 {
-        let unit = memory.read_u16(name + index * 2).map_err(fault)?;
-        if unit == 0 {
-            break;
+impl StandardStreams {
+    /// A narrow file name resolved against the working directory, exactly
+    /// as the CRT resolves relative paths against it on Windows (#1336).
+    fn drive_name_resolved(
+        &self,
+        memory: &GuestMemory,
+        name: u64,
+    ) -> Result<Option<Option<String>>, ExitReason> {
+        if name == 0 {
+            return Ok(None);
         }
-        units.push(unit);
+        let bytes = c_string(memory, name, MAX_NAME + 1).map_err(fault)?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_NAME {
+            return Ok(None);
+        }
+        Ok(Some(self.resolve_path(&bytes)))
     }
-    if units.len() as u64 > MAX_NAME || units.is_empty() {
-        return Ok(None);
+
+    /// The wide form of `drive_name_resolved`, ASCII like the wide names
+    /// the CRT wide file services take.
+    fn drive_name_wide_resolved(
+        &self,
+        memory: &GuestMemory,
+        name: u64,
+    ) -> Result<Option<Option<String>>, ExitReason> {
+        if name == 0 {
+            return Ok(None);
+        }
+        let mut units = Vec::new();
+        for index in 0..MAX_NAME + 1 {
+            let unit = memory.read_u16(name + index * 2).map_err(fault)?;
+            if unit == 0 {
+                break;
+            }
+            units.push(unit);
+        }
+        if units.len() as u64 > MAX_NAME || units.is_empty() {
+            return Ok(None);
+        }
+        if !units.iter().all(|&unit| unit < 0x80) {
+            return Ok(Some(None));
+        }
+        let bytes: Vec<u8> = units.iter().map(|&unit| unit as u8).collect();
+        Ok(Some(self.resolve_path(&bytes)))
     }
-    if !units.iter().all(|&unit| unit < 0x80) {
-        return Ok(Some(None));
-    }
-    let bytes: Vec<u8> = units.iter().map(|&unit| unit as u8).collect();
-    Ok(Some(ObjectState::drive_path(&bytes)))
 }
 
 /// The bytes of a wide mode string, ASCII like the narrow one.
@@ -592,6 +607,29 @@ impl StandardStreams {
         self.opened.absorb_child_positions(&child.opened);
     }
 
+    /// The process working directory, cloned: the kernel file surface
+    /// resolves its own paths against it, exactly as Windows shares the
+    /// one current directory between the CRT and the kernel.
+    pub(super) fn working_directory(&self) -> String {
+        self.cwd.clone()
+    }
+
+    /// `_chdir`'s replacement working directory, already validated against
+    /// the drive's directories.
+    pub(super) fn set_working_directory(&mut self, cwd: String) {
+        self.cwd = cwd;
+    }
+
+    /// A guest file name as the drive stores it, resolved against the
+    /// working directory first exactly as the CRT resolves relative paths
+    /// on Windows: absolute input passes through unchanged, so a path the
+    /// caller already resolved is safe to resolve again.
+    pub(super) fn resolve_path(&self, name: &[u8]) -> Option<String> {
+        let text = std::str::from_utf8(name).ok()?;
+        let resolved = super::crt::resolve_directory(&self.cwd, text);
+        ObjectState::drive_path(resolved.as_bytes())
+    }
+
     pub(super) fn inherit_for_spawn(&self) -> StandardStreams {
         StandardStreams {
             opened: self.opened.inherit_for_spawn(),
@@ -601,6 +639,7 @@ impl StandardStreams {
                 orientation: self.input.orientation,
                 eof: self.input.eof,
             },
+            cwd: self.cwd.clone(),
             ..StandardStreams::default()
         }
     }
@@ -1200,6 +1239,7 @@ impl StandardStreams {
         drive: &mut ObjectState,
         name: u64,
         flags: u32,
+        default_binary: bool,
     ) -> Outcome<i32> {
         if name == 0 {
             return Ok(Err(Failed(-1, EINVAL)));
@@ -1211,9 +1251,12 @@ impl StandardStreams {
         if bytes.is_empty() || bytes.len() as u64 > MAX_NAME {
             return Ok(Err(Failed(-1, EINVAL)));
         }
+        let Some(resolved) = self.resolve_path(&bytes) else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
         Ok(self
             .opened
-            .open_descriptor(drive, &bytes, flags)
+            .open_descriptor(drive, resolved.as_bytes(), flags, default_binary)
             .map(|fd| fd as i32)
             .map_err(|errno| Failed(-1, errno)))
     }
@@ -1447,8 +1490,9 @@ impl StandardStreams {
         memory: &GuestMemory,
         drive: &mut ObjectState,
         name: u64,
+        default_binary: bool,
     ) -> Outcome<i32> {
-        self.open_descriptor(memory, drive, name, 1 | 0x100 | 0x200)
+        self.open_descriptor(memory, drive, name, 1 | 0x100 | 0x200, default_binary)
     }
 
     /// `_mktemp` rewrites the trailing `X` characters of its template into a
@@ -1507,12 +1551,12 @@ impl StandardStreams {
         if fd < 0 || buffer == 0 {
             return Ok(Err(Failed(-1, EINVAL)));
         }
-        let length = match self.opened.descriptor_stat(drive, fd as u32) {
-            Ok(length) => length,
+        let (length, kind) = match self.opened.descriptor_stat(drive, fd as u32) {
+            Ok(stat) => stat,
             Err(errno) => return Ok(Err(Failed(-1, errno))),
         };
         let mut stat = [0u8; 56];
-        stat[6..8].copy_from_slice(&(0x8000_u16 | 0o666).to_le_bytes()); // _S_IFREG | rw
+        stat[6..8].copy_from_slice(&(kind | 0o666).to_le_bytes());
         stat[8..10].copy_from_slice(&1_i16.to_le_bytes()); // one link
         stat[24..32].copy_from_slice(&length.to_le_bytes());
         memory.write_bytes(buffer, &stat).map_err(fault)?;
@@ -1554,7 +1598,7 @@ impl StandardStreams {
             return Ok(Err(Failed(0, EINVAL)));
         }
         let bytes = c_string(memory, mode, 16).map_err(fault)?;
-        if crt_files::parse_mode(&bytes).is_none() {
+        if crt_files::parse_mode(&bytes, false).is_none() {
             return Ok(Err(Failed(0, EINVAL)));
         }
         Ok(self
@@ -1673,13 +1717,18 @@ impl StandardStreams {
     }
 
     /// `_get_osfhandle`: the kernel handle a descriptor wraps, as an
-    /// `intptr_t`. -1 with `EBADF` for one that wraps no kernel object —
-    /// the CRT's own files have none behind them.
-    pub(super) fn get_osfhandle(&mut self, fd: i32) -> Outcome<u64> {
+    /// `intptr_t`. A CRT-opened file synthesizes the kernel object the real
+    /// CRT always has behind its descriptors, lazily (#1312); -1 with
+    /// `EBADF` for a descriptor that is no file at all.
+    pub(super) fn get_osfhandle(
+        &mut self,
+        drive: &mut super::ObjectState,
+        fd: i32,
+    ) -> Outcome<u64> {
         if fd < 0 {
             return Ok(Err(Failed(u64::MAX, EBADF)));
         }
-        Ok(match self.opened.descriptor_handle(fd as u32) {
+        Ok(match self.opened.descriptor_handle(drive, fd as u32) {
             std::result::Result::Ok(handle) => Ok(handle),
             std::result::Result::Err(errno) => Err(Failed(u64::MAX, errno)),
         })
@@ -1814,6 +1863,7 @@ impl StandardStreams {
         file: u64,
         name: u64,
         mode: u64,
+        default_binary: bool,
     ) -> Outcome<i32> {
         // Null the output, then answer EINVAL as both the result and errno.
         let invalid = |memory: &mut GuestMemory| -> Outcome<i32> {
@@ -1839,7 +1889,16 @@ impl StandardStreams {
         {
             return invalid(memory);
         }
-        match self.opened.open(memory, drive, &name_bytes, &mode_bytes) {
+        let Some(name_resolved) = self.resolve_path(&name_bytes) else {
+            return invalid(memory);
+        };
+        match self.opened.open(
+            memory,
+            drive,
+            name_resolved.as_bytes(),
+            &mode_bytes,
+            default_binary,
+        ) {
             Ok(stream) => {
                 memory.write_u64(file, stream).map_err(fault)?;
                 Ok(Ok(0))
@@ -1956,6 +2015,7 @@ impl StandardStreams {
         drive: &mut ObjectState,
         name: u64,
         mode: u64,
+        default_binary: bool,
     ) -> Outcome<u64> {
         // A null name or mode is an invalid parameter, as an empty one is.
         if name == 0 || mode == 0 {
@@ -1966,9 +2026,12 @@ impl StandardStreams {
         if name.len() as u64 > MAX_NAME || mode.len() as u64 > MAX_NAME {
             return Ok(Err(Failed(0, EINVAL)));
         }
+        let Some(name) = self.resolve_path(&name) else {
+            return Ok(Err(Failed(0, EINVAL)));
+        };
         Ok(self
             .opened
-            .open(memory, drive, &name, &mode)
+            .open(memory, drive, name.as_bytes(), &mode, default_binary)
             .map_err(|errno| Failed(0, errno)))
     }
 
@@ -2028,7 +2091,14 @@ impl StandardStreams {
                 self.opened.close(memory, drive, file);
                 Ok(Ok(0))
             }
-            _ => Err(RUNTIME_LIMIT),
+            // Closing a standard stream is legal on Windows - the CRT does
+            // not reserve them - and every later operation on the descriptor
+            // fails with EBADF, exactly as `_close` of the descriptor itself
+            // behaves. awk and other filter applets close their input when
+            // it reaches EOF, before exit (#1273).
+            Stream::Input => self.close_descriptor(memory, drive, 0),
+            Stream::Output => self.close_descriptor(memory, drive, 1),
+            Stream::Error => self.close_descriptor(memory, drive, 2),
         }
     }
 
@@ -2119,7 +2189,7 @@ impl StandardStreams {
         drive: &mut ObjectState,
         name: u64,
     ) -> Outcome<i32> {
-        let Some(path) = drive_name(memory, name)? else {
+        let Some(path) = self.drive_name_resolved(memory, name)? else {
             return Ok(Err(Failed(-1, EINVAL)));
         };
         let Some(path) = path else {
@@ -2146,7 +2216,10 @@ impl StandardStreams {
         from: u64,
         to: u64,
     ) -> Outcome<i32> {
-        let (Some(from), Some(to)) = (drive_name(memory, from)?, drive_name(memory, to)?) else {
+        let (Some(from), Some(to)) = (
+            self.drive_name_resolved(memory, from)?,
+            self.drive_name_resolved(memory, to)?,
+        ) else {
             return Ok(Err(Failed(-1, EINVAL)));
         };
         let (Some(from), Some(to)) = (from, to) else {
@@ -2415,17 +2488,18 @@ impl StandardStreams {
         drive: &mut ObjectState,
         name: u64,
         mode: u64,
+        default_binary: bool,
     ) -> Outcome<u64> {
         if name == 0 || mode == 0 {
             return Ok(Err(Failed(0, EINVAL)));
         }
-        let Some(Some(path)) = drive_name_wide(memory, name)? else {
+        let Some(Some(path)) = self.drive_name_wide_resolved(memory, name)? else {
             return Ok(Err(Failed(0, EINVAL)));
         };
         let mode = wide_ascii(memory, mode, 16).map_err(|_| RUNTIME_LIMIT)?;
         Ok(self
             .opened
-            .open(memory, drive, path.as_bytes(), &mode)
+            .open(memory, drive, path.as_bytes(), &mode, default_binary)
             .map_err(|errno| Failed(0, errno)))
     }
 
@@ -2440,9 +2514,9 @@ impl StandardStreams {
         wide: bool,
     ) -> Outcome<i32> {
         let resolved = if wide {
-            drive_name_wide(memory, name)?
+            self.drive_name_wide_resolved(memory, name)?
         } else {
-            drive_name(memory, name)?
+            self.drive_name_resolved(memory, name)?
         };
         let Some(Some(path)) = resolved else {
             return Ok(Err(Failed(-1, EINVAL)));
@@ -2476,9 +2550,9 @@ impl StandardStreams {
             return Ok(Err(Failed(-1, EINVAL)));
         }
         let resolved = if wide {
-            drive_name_wide(memory, name)?
+            self.drive_name_wide_resolved(memory, name)?
         } else {
-            drive_name(memory, name)?
+            self.drive_name_resolved(memory, name)?
         };
         let Some(Some(path)) = resolved else {
             return Ok(Err(Failed(-1, EINVAL)));
@@ -2504,7 +2578,7 @@ impl StandardStreams {
         drive: &mut ObjectState,
         name: u64,
     ) -> Outcome<i32> {
-        let Some(Some(path)) = drive_name_wide(memory, name)? else {
+        let Some(Some(path)) = self.drive_name_wide_resolved(memory, name)? else {
             return Ok(Err(Failed(-1, EINVAL)));
         };
         match drive.drive_entry(&path) {
@@ -2530,7 +2604,7 @@ impl StandardStreams {
         name: u64,
         mode: u32,
     ) -> Outcome<i32> {
-        let Some(Some(path)) = drive_name(memory, name)? else {
+        let Some(Some(path)) = self.drive_name_resolved(memory, name)? else {
             return Ok(Err(Failed(-1, EINVAL)));
         };
         if drive.drive_chmod(&path, mode & 0x80 == 0) {
@@ -2551,7 +2625,7 @@ impl StandardStreams {
         name: u64,
         mode: u32,
     ) -> Outcome<i32> {
-        let Some(Some(path)) = drive_name_wide(memory, name)? else {
+        let Some(Some(path)) = self.drive_name_wide_resolved(memory, name)? else {
             return Ok(Err(Failed(-1, EINVAL)));
         };
         if drive.drive_chmod(&path, mode & 0x80 == 0) {
@@ -2572,7 +2646,7 @@ impl StandardStreams {
         name: u64,
         output: u64,
     ) -> Outcome<i32> {
-        let Some(Some(path)) = drive_name_wide(memory, name)? else {
+        let Some(Some(path)) = self.drive_name_wide_resolved(memory, name)? else {
             return Ok(Err(Failed(-1, EINVAL)));
         };
         if output == 0 {
@@ -2880,6 +2954,31 @@ mod tests {
         (StandardStreams::default(), memory, ObjectState::default())
     }
 
+    /// A relative file name resolves against the working directory exactly
+    /// as the CRT resolves it on Windows: `_chdir` into `x` makes `d` the
+    /// drive's `x\\d`, while absolute input passes through unchanged, so
+    /// tar's extraction after its chdir creates the archive's members under
+    /// the target directory (#1336).
+    #[test]
+    fn relative_paths_resolve_against_the_working_directory() {
+        let (mut streams, _memory, _drive) = fixture();
+        assert_eq!(streams.resolve_path(b"d"), Some("d".to_owned()));
+        streams.set_working_directory("x".to_owned());
+        assert_eq!(streams.resolve_path(b"d"), Some("x\\d".to_owned()));
+        assert_eq!(streams.resolve_path(b"./d"), Some("x\\d".to_owned()));
+        assert_eq!(streams.resolve_path(b"..\\d"), Some("d".to_owned()));
+        // An absolute name is already resolved: applying the resolution
+        // again is idempotent, as the open paths resolving before the
+        // drive's own canonicalisation rely on.
+        assert_eq!(streams.resolve_path(b"c:\\y\\d"), Some("y\\d".to_owned()));
+        // The copy a spawned child inherits keeps the directory at spawn
+        // time, and the parent's later moves do not reach it, as on Windows.
+        let child = streams.inherit_for_spawn();
+        streams.set_working_directory("moved".to_owned());
+        assert_eq!(child.resolve_path(b"d"), Some("x\\d".to_owned()));
+        assert_eq!(streams.resolve_path(b"d"), Some("moved\\d".to_owned()));
+    }
+
     /// A redirection `_dup2` onto a standard number routes the standard
     /// stream's writes through the descriptor machinery into the file, as
     /// the CRT writes its streams through descriptors 1 and 2; restoring
@@ -2889,11 +2988,11 @@ mod tests {
         let (mut streams, mut memory, mut drive) = fixture();
         let _file = streams
             .opened
-            .open(&mut memory, &mut drive, b"target", b"w")
+            .open(&mut memory, &mut drive, b"target", b"w", false)
             .expect("open");
         let file_fd = streams
             .opened
-            .open_descriptor(&mut drive, b"target", 1)
+            .open_descriptor(&mut drive, b"target", 1, false)
             .expect("write descriptor");
         // The same write through the descriptor itself succeeds, so the
         // assertions below isolate the routing rather than the file.
@@ -2929,6 +3028,29 @@ mod tests {
         assert_eq!(streams.output(), b"captured");
     }
 
+    /// Closing a standard stream is legal: awk and other filter applets
+    /// close their input when it reaches EOF, before exit, and the CRT does
+    /// not reserve the standard streams (#1273). The close marks the
+    /// descriptor closed exactly as `_close` of it does, every later
+    /// operation fails, and a second close has nothing to close.
+    #[test]
+    fn fclose_of_a_standard_stream_closes_the_descriptor_once() {
+        let (mut streams, mut memory, mut drive) = fixture();
+        let stdin = streams.file(&mut memory, 0).expect("stdin object");
+        // The close succeeds rather than stopping the guest.
+        let closed = streams
+            .close(&mut memory, &mut drive, stdin)
+            .expect("no stop");
+        assert!(matches!(closed, Ok(0)));
+        // The descriptor is marked closed exactly as `_close(0)` marks it.
+        assert!(streams.opened.closed[0]);
+        // A second close fails rather than closing again.
+        let twice = streams
+            .close(&mut memory, &mut drive, stdin)
+            .expect("no stop");
+        assert!(matches!(twice, Err(_)));
+    }
+
     /// A spawned child inherits a position snapshot of each file-backed
     /// descriptor, and the positions it leaves behind write back into the
     /// parent's streams: one advancing position across the two processes.
@@ -2939,7 +3061,7 @@ mod tests {
         drive.drive_write("shared", 0, b"0123456789");
         let fd = parent
             .opened
-            .open_descriptor(&mut drive, b"shared", 0)
+            .open_descriptor(&mut drive, b"shared", 0, false)
             .expect("parent descriptor");
         let _ = memory;
         let _ = fd;

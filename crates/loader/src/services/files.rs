@@ -53,6 +53,22 @@ pub(super) struct OpenFile {
 }
 
 impl OpenFile {
+    /// The CRT interop synthesizes the kernel file object every real CRT
+    /// descriptor has behind it, for a stream that was opened through the
+    /// CRT alone (#1312): the object's position starts where the stream's
+    /// is now, and the two move independently afterward exactly as a real
+    /// CRT stream's buffered position and its kernel handle do.
+    pub(super) fn for_interop(path: String, access: u32, position: u64) -> Self {
+        OpenFile {
+            path,
+            position: Arc::new(AtomicU64::new(position)),
+            open_access: access,
+            access,
+            share: 0,
+            directory: false,
+        }
+    }
+
     /// The CRT interop reads and writes the object through these, under the
     /// same serialization the object table gives the kernel calls.
     pub(super) fn path(&self) -> &str {
@@ -87,8 +103,17 @@ fn read_guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>,
                 return Ok(None);
             }
             let path = path.replace('/', "\\").to_ascii_lowercase();
-            let name = path.strip_prefix("c:\\").unwrap_or(&path);
-            return Ok(Some(name.to_owned()));
+            // A drive-rooted `c:\foo` is an absolute path: it anchors at
+            // the volume root exactly as a leading separator does, so it
+            // keeps its anchor rather than collapsing into the relative
+            // `foo` - which would resolve against the working directory and
+            // stop resolving the moment the process leaves its start
+            // directory (#1342).
+            let name = match path.strip_prefix("c:\\") {
+                Some(rest) => format!("\\{rest}"),
+                None => path,
+            };
+            return Ok(Some(name));
         }
         units.push(unit);
     }
@@ -165,11 +190,7 @@ fn valid_key(name: &str) -> bool {
 /// is the volume root. `None` when any component is not a name the drive
 /// accepts.
 fn resolve_bare_path(state: &ServicesState, name: &str) -> Option<String> {
-    let cwd = state
-        .crt_directory
-        .lock()
-        .expect("CRT working directory")
-        .clone();
+    let cwd = state.crt_streams().working_directory();
     // A drive prefix (`c:`) anchors at the volume; what remains resolves
     // against the working directory, dot segments included.
     let stripped = name.replace('/', "\\");
@@ -210,8 +231,17 @@ fn read_guest_path_a(memory: &GuestMemory, address: u64) -> Result<Option<String
                 return Ok(None);
             }
             let path = path.replace('/', "\\").to_ascii_lowercase();
-            let name = path.strip_prefix("c:\\").unwrap_or(&path);
-            return Ok(Some(name.to_owned()));
+            // A drive-rooted `c:\foo` is an absolute path: it anchors at
+            // the volume root exactly as a leading separator does, so it
+            // keeps its anchor rather than collapsing into the relative
+            // `foo` - which would resolve against the working directory and
+            // stop resolving the moment the process leaves its start
+            // directory (#1342).
+            let name = match path.strip_prefix("c:\\") {
+                Some(rest) => format!("\\{rest}"),
+                None => path,
+            };
+            return Ok(Some(name));
         }
         bytes.push(byte);
     }
@@ -458,11 +488,7 @@ fn find_first(
         return Err(INVALID_NAME);
     }
     let pattern = if pattern == "*.*" { "*" } else { pattern };
-    let cwd = state
-        .crt_directory
-        .lock()
-        .expect("CRT working directory")
-        .clone();
+    let cwd = state.crt_streams().working_directory();
     // A bare drive root (`c:` as the whole directory portion) anchors at the
     // volume root: the wildcard split consumed the separating backslash.
     let resolved = if root.len() == 2 && root.as_bytes()[1] == b':' {
@@ -1587,11 +1613,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             let Some(name) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
                 return full.fail(cpu.gs_base, INVALID_NAME, 0);
             };
-            let cwd = full
-                .crt_directory
-                .lock()
-                .expect("CRT working directory")
-                .clone();
+            let cwd = full.crt_streams().working_directory();
             let Some(full_path) = full_name(&cwd, &name) else {
                 return full.fail(cpu.gs_base, INVALID_NAME, 0);
             };
@@ -1820,6 +1842,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                     if count == 0 {
                         0
                     } else {
+                        if !pipe.read_open {
+                            return state.fail(cpu.gs_base, 109, 0); // ERROR_BROKEN_PIPE
+                        }
                         if pipe.buffer.len() + count > MAX_BYTES {
                             return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
                         }
@@ -2022,11 +2047,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         else {
             return fail(memory, super::crt_files::EINVAL);
         };
-        let cwd = fullpath_state
-            .crt_directory
-            .lock()
-            .expect("CRT working directory")
-            .clone();
+        let cwd = fullpath_state.crt_streams().working_directory();
         let Some(resolved) = full_name(&cwd, &name) else {
             return fail(memory, super::crt_files::EINVAL);
         };
@@ -2547,6 +2568,11 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 pub(super) struct PipeState {
     pub buffer: std::collections::VecDeque<u8>,
     pub write_open: bool,
+    /// The mirror of `write_open` on the read side: once the last reference
+    /// to the read end closes anywhere, writes fail broken instead of
+    /// buffering forever, exactly as ERROR_BROKEN_PIPE reaches a Windows
+    /// writer whose reader is gone.
+    pub read_open: bool,
 }
 
 /// What a path names on the drive, for the C runtime's file streams.
@@ -2748,6 +2774,73 @@ impl super::ObjectState {
 #[cfg(test)]
 mod tests {
     use super::super::ObjectState;
+    use super::{read_guest_path, read_guest_path_a};
+    use crate::memory::GuestMemory;
+
+    fn narrow_at(memory: &mut GuestMemory, address: u64, text: &str) {
+        memory.write_bytes(address, text.as_bytes()).expect("write");
+        memory
+            .write_u8(address + text.len() as u64, 0)
+            .expect("terminator");
+    }
+
+    fn mapped_memory() -> GuestMemory {
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region(0x1000, 0x1000, crate::memory::MemoryPermissions::READ_WRITE)
+            .expect("map");
+        memory
+    }
+
+    /// A drive-rooted path keeps its anchor through the kernel32 path
+    /// readers exactly as it does on Windows: `c:\f` is absolute, so it
+    /// reads as the rooted `\f` rather than the relative `f` - which would
+    /// resolve against the working directory and stop resolving the moment
+    /// the process leaves its start directory. busybox-w32 stats its own
+    /// executable through this very path before every spawn, and the spawn
+    /// broke after `cd` because the absolute answer of GetModuleFileName
+    /// lost its anchor here (#1342).
+    #[test]
+    fn drive_rooted_paths_keep_their_anchor_through_the_readers() {
+        let mut memory = mapped_memory();
+        narrow_at(&mut memory, 0x1000, "c:\\d\\f");
+        assert_eq!(
+            read_guest_path_a(&memory, 0x1000).expect("read"),
+            Some("\\d\\f".to_owned())
+        );
+        narrow_at(&mut memory, 0x1100, "C:/d/f");
+        assert_eq!(
+            read_guest_path_a(&memory, 0x1100).expect("read"),
+            Some("\\d\\f".to_owned())
+        );
+        // A relative name keeps no anchor, so the working directory still
+        // reaches it.
+        narrow_at(&mut memory, 0x1200, "d\\f");
+        assert_eq!(
+            read_guest_path_a(&memory, 0x1200).expect("read"),
+            Some("d\\f".to_owned())
+        );
+        // An already-rooted name is unchanged, as is a drive-relative one.
+        narrow_at(&mut memory, 0x1300, "\\d\\f");
+        assert_eq!(
+            read_guest_path_a(&memory, 0x1300).expect("read"),
+            Some("\\d\\f".to_owned())
+        );
+        // The wide reader canonicalises the same way.
+        let wide: Vec<u16> = "c:\\d\\f".encode_utf16().collect();
+        for (index, unit) in wide.iter().enumerate() {
+            memory
+                .write_u16(0x1400 + index as u64 * 2, *unit)
+                .expect("write");
+        }
+        memory
+            .write_u16(0x1400 + wide.len() as u64 * 2, 0)
+            .expect("terminator");
+        assert_eq!(
+            read_guest_path(&memory, 0x1400).expect("read"),
+            Some("\\d\\f".to_owned())
+        );
+    }
 
     /// The trailing separator of the Windows path grammar: `dir/` names
     /// `dir`, as the shell's mkdir -p idiom depends on when it creates

@@ -86,6 +86,20 @@ impl fmt::Display for MemoryError {
 impl std::error::Error for MemoryError {}
 
 pub(crate) const PROCESS_HEAP: u64 = u64::MAX - 2;
+
+/// Page-granular commit size for a heap allocation of `size` requested
+/// bytes. A zero request stays a zero-length marker, as before: no byte of
+/// it is ever legimiately accessible, so the arena slack means nothing to
+/// it, and the empty-marker layouts the memory model supports stay
+/// representable.
+fn heap_commit(size: usize) -> usize {
+    if size == 0 {
+        return 0;
+    }
+    size.checked_add(4095)
+        .map(|padded| padded / 4096 * 4096)
+        .unwrap_or(size)
+}
 const MAX_DYNAMIC_BYTES: usize = 64 * 1024 * 1024;
 /// Host storage bound for each dynamic allocation kind.
 pub(crate) const DYNAMIC_BUDGET: u64 = MAX_DYNAMIC_BYTES as u64;
@@ -161,6 +175,11 @@ pub(crate) struct MainImage {
 #[derive(Default, Clone)]
 pub struct GuestMemory {
     regions: Vec<MappedRegion>,
+    /// Exact requested size of each live heap allocation, keyed by its base.
+    /// Heap commits are page granular (see `map_heap_allocation`), so the
+    /// region length is the commit, not the size the guest asked for; the
+    /// Win32 heap APIs report the requested size.
+    heap_exact_bytes: std::collections::HashMap<u64, usize>,
     /// Complete `[base, end)` spans retained for explicit module images. The
     /// committed headers and sections remain ordinary regions inside these
     /// spans; the records themselves cost no per-byte backing and exist so
@@ -420,6 +439,12 @@ impl GuestMemory {
         true
     }
 
+    /// Heap commits are page granular, reproducing the Windows CRT heap,
+    /// which carves allocations out of page-committed arenas: bytes just
+    /// past a small block stay committed, and guest code that strays a few
+    /// bytes past the exact size - the mingw CRT stdio macros do - completes
+    /// instead of faulting. The exact requested size is tracked separately
+    /// so `heap_allocation_size` keeps answering what the guest asked for.
     pub(crate) fn map_heap_allocation(
         &mut self,
         heap: u64,
@@ -437,13 +462,16 @@ impl GuestMemory {
         if !self.has_heap(heap) || alignment == 0 || !alignment.is_power_of_two() {
             return Err(MemoryError::AllocationFailed);
         }
-        self.map_dynamic_allocation_aligned(
+        let commit = heap_commit(size);
+        let base = self.map_dynamic_allocation_aligned(
             0,
-            size,
+            commit,
             MemoryPermissions::READ_WRITE,
             AllocationKind::Heap(heap),
             alignment,
-        )
+        )?;
+        self.heap_exact_bytes.insert(base, size);
+        Ok(base)
     }
 
     fn map_dynamic_allocation(
@@ -572,9 +600,19 @@ impl GuestMemory {
             })
             .ok_or(MemoryError::UnmappedAddress(base))?;
         let previous = self.regions[index].data.len();
+        let commit = heap_commit(size);
         let other_bytes = self.dynamic_bytes(AllocationKind::Heap(heap)) - previous;
-        if size > MAX_DYNAMIC_BYTES - other_bytes {
+        if commit > MAX_DYNAMIC_BYTES - other_bytes {
             return Err(MemoryError::AllocationFailed);
+        }
+
+        if commit == previous {
+            // Growth or shrink inside the same committed page needs no memory
+            // operation at all: the slack stays committed, exactly as the
+            // Windows heap keeps the arena page committed. Only the exact
+            // requested size tracked for the heap APIs changes.
+            self.heap_exact_bytes.insert(base, size);
+            return Ok(base);
         }
 
         let region_boundary = self
@@ -594,27 +632,29 @@ impl GuestMemory {
             .min()
             .unwrap_or(u64::MAX);
         let boundary = region_boundary.min(reservation_boundary);
-        let destination = if (size as u64) <= boundary - base {
+        let destination = if (commit as u64) <= boundary - base {
             base
         } else if in_place_only {
             return Err(MemoryError::AllocationFailed);
         } else {
-            self.find_dynamic_base(size)?
+            self.find_dynamic_base(commit)?
         };
 
         let region = &mut self.regions[index];
         region
             .data
-            .try_reserve_exact(size.saturating_sub(previous))
+            .try_reserve_exact(commit.saturating_sub(previous))
             .map_err(|_| MemoryError::AllocationFailed)?;
-        region.data.resize(size, 0);
-        if size < previous {
+        region.data.resize(commit, 0);
+        if commit < previous {
             region.data.shrink_to_fit();
         }
         if destination != base {
             region.base = destination;
             self.regions.sort_by_key(|region| region.base);
         }
+        self.heap_exact_bytes.remove(&base);
+        self.heap_exact_bytes.insert(destination, size);
         Ok(destination)
     }
 
@@ -787,13 +827,14 @@ impl GuestMemory {
     }
 
     pub(crate) fn heap_allocation_size(&self, heap: u64, base: u64) -> Option<usize> {
-        self.regions
-            .iter()
-            .find(|region| region.base == base && region.allocation == AllocationKind::Heap(heap))
-            .map(|region| region.data.len())
+        self.regions.iter().find(|region| {
+            region.base == base && region.allocation == AllocationKind::Heap(heap)
+        })?;
+        self.heap_exact_bytes.get(&base).copied()
     }
 
     fn release_dynamic_allocation(&mut self, base: u64, allocation: AllocationKind) -> bool {
+        self.heap_exact_bytes.remove(&base);
         if allocation == AllocationKind::Virtual {
             let before = self.regions.len();
             // VirtualProtect may split one virtual allocation into adjacent
@@ -1169,6 +1210,42 @@ mod tests {
         assert!(memory.release_xmem_allocation(xmem_base));
         assert!(memory.release_virtual_allocation(virtual_base));
         assert_eq!(memory.usage().1, before);
+    }
+
+    #[test]
+    fn heap_allocations_commit_page_slack_but_report_exact_sizes() {
+        // The Windows CRT heap carves blocks out of page-committed arenas, so
+        // the bytes just past a small allocation are committed zeroes rather
+        // than a fault (#1421). The heap APIs keep reporting the exact
+        // requested size regardless.
+        let mut memory = GuestMemory::new();
+        let base = memory.map_heap_allocation(PROCESS_HEAP, 8).unwrap();
+        assert_eq!(memory.heap_allocation_size(PROCESS_HEAP, base), Some(8));
+        for at in [base, base + 8, base + 4095] {
+            assert_eq!(memory.read_u8(at), Ok(0));
+            assert_eq!(memory.write_u8(at, 0xaa), Ok(()));
+        }
+        assert_eq!(
+            memory.read_u8(base + 4096),
+            Err(MemoryError::UnmappedAddress(base + 4096))
+        );
+        // A zero-length request stays a zero-length marker: no byte of it is
+        // committed, and it can share its base with other empty markers.
+        let empty = memory.map_heap_allocation(PROCESS_HEAP, 0).unwrap();
+        assert_eq!(memory.heap_allocation_size(PROCESS_HEAP, empty), Some(0));
+        // Growth inside the committed page is a pure in-place size change:
+        // the base cannot move, even when a move is allowed.
+        let grown = memory
+            .resize_heap_allocation(PROCESS_HEAP, base, 4000, false)
+            .unwrap();
+        assert_eq!(grown, base);
+        assert_eq!(memory.heap_allocation_size(PROCESS_HEAP, base), Some(4000));
+        assert_eq!(memory.read_u8(base), Ok(0xaa));
+        assert_eq!(
+            memory.resize_heap_allocation(PROCESS_HEAP, base, 0, true),
+            Ok(base)
+        );
+        assert_eq!(memory.heap_allocation_size(PROCESS_HEAP, base), Some(0));
     }
 
     #[test]
@@ -1914,7 +1991,7 @@ mod mapping_group_contract_tests {
             .map_region_with_data(BASE, 4, MemoryPermissions::READ_ONLY, &[1, 2, 3, 4])
             .unwrap();
         memory
-            .map_region(BASE + 16, 8, MemoryPermissions::READ_ONLY)
+            .map_region(BASE + 0x2000, 8, MemoryPermissions::READ_ONLY)
             .unwrap();
         let heap = memory.create_private_heap(0).unwrap();
         assert_eq!(memory.map_heap_allocation(PROCESS_HEAP, 0), Ok(BASE));
@@ -1926,12 +2003,15 @@ mod mapping_group_contract_tests {
         assert_eq!(memory.resize_heap_allocation(heap, BASE, 8, true), Ok(BASE));
         memory.write_bytes(BASE + 4, &[5, 6, 7, 8]).unwrap();
         assert_eq!(memory.read_u64(BASE), Ok(0x0807_0605_0403_0201));
+        // Heap commits are page granular: a growth inside the committed
+        // page always stays in place, so the no-room-in-place and move cases
+        // exercise with sizes that cross the page boundary.
         assert_eq!(
-            memory.resize_heap_allocation(heap, BASE, 32, true),
+            memory.resize_heap_allocation(heap, BASE, 0x2001, true),
             Err(MemoryError::AllocationFailed)
         );
         let moved = memory
-            .resize_heap_allocation(heap, BASE, 32, false)
+            .resize_heap_allocation(heap, BASE, 0x2001, false)
             .unwrap();
         assert_ne!(moved, BASE);
         let mut bytes = [0xff; 32];
@@ -1958,7 +2038,7 @@ mod mapping_group_contract_tests {
         assert!(memory.release_heap_allocation(PROCESS_HEAP, BASE));
         assert_eq!(memory.read_u32(BASE), Ok(0x0403_0201));
         assert_eq!(memory.read_u64(BASE - 16), Ok(0));
-        assert_eq!(memory.read_u64(BASE + 16), Ok(0));
+        assert_eq!(memory.read_u64(BASE + 0x2000), Ok(0));
     }
 }
 
@@ -2436,18 +2516,18 @@ mod region_lookup_contract_tests {
             })
         );
         assert_eq!(memory.write_bytes(SHARED + 6, &[7; 6]), Ok(()));
+        // Heap commits are page granular, so the blocks do not end at their
+        // exact sizes: the slack reads back as zeroes, and memory ends at
+        // the end of the shared commit page instead.
         let mut out = [0xee; 13];
-        assert_eq!(
-            memory.read_bytes(SHARED, &mut out),
-            Err(MemoryError::UnmappedAddress(SHARED + 12))
-        );
-        assert_eq!(out, [0xee; 13], "a failed read writes nothing");
+        memory.read_bytes(SHARED, &mut out).unwrap();
+        assert_eq!(out, [1, 2, 3, 4, 0, 0x55, 7, 7, 7, 7, 7, 7, 0]);
         let mut out = [0xee; 12];
         memory.read_bytes(SHARED, &mut out).unwrap();
         assert_eq!(out, [1, 2, 3, 4, 0, 0x55, 7, 7, 7, 7, 7, 7]);
         assert_eq!(
-            memory.read_u8(SHARED + 12),
-            Err(MemoryError::UnmappedAddress(SHARED + 12))
+            memory.read_u8(SHARED + 0x1000),
+            Err(MemoryError::UnmappedAddress(SHARED + 0x1000))
         );
         check_run(&mut memory, LOW, 0, 400);
         check_run(&mut memory, HIGH, 400, 400);

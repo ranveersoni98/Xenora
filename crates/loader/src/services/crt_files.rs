@@ -27,6 +27,8 @@ use std::collections::BTreeMap;
 /// errno.h values.
 pub(super) const ENOENT: u32 = 2;
 pub(super) const EBADF: u32 = 9;
+/// The CRT's broken pipe error, the value the Windows CRT documents.
+pub(super) const EPIPE: u32 = 32;
 /// A wide character the C locale cannot write.
 pub(super) const EILSEQ: u32 = 42;
 pub(super) const ENOMEM: u32 = 12;
@@ -79,7 +81,7 @@ pub(super) struct Mode {
 /// `r`, `w` or `a` first, then `+`, `b` and `t` in any order, each at most
 /// once and not both `b` and `t`. Anything else is not a mode this runtime
 /// opens, including the other characters the page lists.
-pub(super) fn parse_mode(mode: &[u8]) -> Option<Mode> {
+pub(super) fn parse_mode(mode: &[u8], default_binary: bool) -> Option<Mode> {
     let (&kind, rest) = mode.split_first()?;
     let (mut update, mut binary, mut text) = (false, false, false);
     for &byte in rest {
@@ -102,13 +104,21 @@ pub(super) fn parse_mode(mode: &[u8]) -> Option<Mode> {
         b'a' => (update, true, true, false, false),
         _ => return None,
     };
+    // An explicit b or t fixes the translation; without one the stream
+    // takes the `_fmode` default, exactly as the CRT documents fopen.
     Some(Mode {
         readable,
         writable,
         append,
         existing,
         truncate,
-        text: !binary,
+        text: if binary {
+            false
+        } else if text {
+            true
+        } else {
+            !default_binary
+        },
     })
 }
 
@@ -148,6 +158,14 @@ struct FileStream {
     /// Bytes `ungetc` pushed back, in push order: the last byte pushed is
     /// the first one a read hands out again, as the CRT stacks them.
     pushback: Vec<u8>,
+    /// The kernel file object `_get_osfhandle` synthesized for this stream,
+    /// lazily, the first time a guest asks. Every CRT file descriptor has a
+    /// kernel handle behind it on Windows - the CRT itself opens files on
+    /// top of CreateFile - and win32 layers that implement their `fstat`
+    /// through `_get_osfhandle` and the file-type queries depend on it. The
+    /// object carries its own position cell, exactly as the kernel handle
+    /// of a real CRT stream does next to the stream's buffered position.
+    osfhandle: Option<u64>,
     /// Byte ranges `_locking` holds, as (start, end) pairs with the end
     /// exclusive. They live in the stream itself: a duplication shares them
     /// exactly as it shares the position, and closing the last descriptor
@@ -281,11 +299,12 @@ impl FileStreams {
         drive: &mut ObjectState,
         name: &[u8],
         mode: &[u8],
+        default_binary: bool,
     ) -> Result<u64, u32> {
         // An empty name or mode is an invalid parameter: neither is a mode
         // nor a name the drive accepts. Xenora's choice: so is any other mode
         // it does not open and any other name the drive rejects.
-        let mode = parse_mode(mode).ok_or(EINVAL)?;
+        let mode = parse_mode(mode, default_binary).ok_or(EINVAL)?;
         let path = ObjectState::drive_path(name).ok_or(EINVAL)?;
         if self.open.len() >= MAX_OPEN_STREAMS {
             return Err(EMFILE);
@@ -341,6 +360,7 @@ impl FileStreams {
                 error: false,
                 orientation: 0,
                 pushback: Vec::new(),
+                osfhandle: None,
                 locks: Vec::new(),
             },
         );
@@ -411,6 +431,7 @@ impl FileStreams {
                 error: false,
                 orientation: 0,
                 pushback: Vec::new(),
+                osfhandle: None,
                 locks: Vec::new(),
             },
         );
@@ -774,21 +795,45 @@ impl FileStreams {
         }
     }
 
-    /// The path and length a `_fstat64` reports, of the file a descriptor
+    /// The length and mode a `_fstat64` reports, of the file a descriptor
     /// has open. A removed file reports the length it would have had, as the
     /// descriptor still has it open: zero, the drive carries no content for
-    /// it anymore.
-    pub(super) fn descriptor_stat(&self, drive: &ObjectState, fd: u32) -> Result<u64, u32> {
+    /// it anymore. A pipe end reports the FIFO mode and no size, exactly as
+    /// the CRT stats an anonymous pipe; a handle that is no file at all -
+    /// a thread, an event - is not a valid file descriptor to stat.
+    pub(super) fn descriptor_stat(&self, drive: &ObjectState, fd: u32) -> Result<(u64, u16), u32> {
+        const REGULAR: u16 = 0x8000; // _S_IFREG
+        const FIFO: u16 = 0x1000; // _S_IFIFO
         let fd = self.descriptor_terminal(fd)?;
-        let stream = match self.descriptors.get(&fd).ok_or(EBADF)? {
-            Descriptor::Shared(file) => self.open.get(file).ok_or(EBADF)?,
-            Descriptor::Owned(stream) => stream,
-            _ => return Err(EBADF),
-        };
-        let _ = stream;
-        Ok(drive
-            .drive_file(&stream.path)
-            .map_or(0, |data| data.len() as u64))
+        match self.descriptors.get(&fd).ok_or(EBADF)? {
+            Descriptor::Shared(file) => {
+                let stream = self.open.get(file).ok_or(EBADF)?;
+                let _ = stream;
+                Ok((
+                    drive
+                        .drive_file(&stream.path)
+                        .map_or(0, |data| data.len() as u64),
+                    REGULAR,
+                ))
+            }
+            Descriptor::Owned(stream) => Ok((
+                drive
+                    .drive_file(&stream.path)
+                    .map_or(0, |data| data.len() as u64),
+                REGULAR,
+            )),
+            Descriptor::Handle(handle) => match drive.handles.get(handle) {
+                Some(GuestObject::Pipe { .. }) => Ok((0, FIFO)),
+                Some(GuestObject::File(file)) => Ok((
+                    drive
+                        .drive_file(file.path())
+                        .map_or(0, |data| data.len() as u64),
+                    REGULAR,
+                )),
+                _ => Err(EBADF),
+            },
+            _ => Err(EBADF),
+        }
     }
 
     /// The terminal descriptor's stream, mutably: the owned state of an
@@ -929,10 +974,13 @@ impl FileStreams {
                 && matches!(drive.handles.get(&handle), Some(GuestObject::Pipe { .. }))
                 && drive.pipe_ref_release(handle)
             {
-                if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle)
-                    && *write
-                {
-                    state.lock().expect("pipe state").write_open = false;
+                if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle) {
+                    let mut pipe = state.lock().expect("pipe state");
+                    if *write {
+                        pipe.write_open = false;
+                    } else {
+                        pipe.read_open = false;
+                    }
                 }
                 drive.handles.remove(&handle);
             }
@@ -962,6 +1010,7 @@ impl FileStreams {
         let shared =
             std::sync::Arc::new(std::sync::Mutex::new(crate::services::files::PipeState {
                 write_open: true,
+                read_open: true,
                 ..crate::services::files::PipeState::default()
             }));
         let Some(read_handle) = drive.next_handle() else {
@@ -1106,6 +1155,7 @@ impl FileStreams {
         drive: &mut ObjectState,
         name: &[u8],
         flags: u32,
+        default_binary: bool,
     ) -> Result<u32, u32> {
         let path = ObjectState::drive_path(name).ok_or(EINVAL)?;
         let (readable, writable) = match flags & 3 {
@@ -1118,8 +1168,16 @@ impl FileStreams {
         let create = flags & 0x100 != 0;
         let truncate = flags & 0x200 != 0;
         let exclusive = flags & 0x400 != 0;
-        // Text unless binary, as `_fmode` starts as `_O_TEXT`.
-        let text = flags & 0x8000 == 0;
+        // `_O_BINARY` and `_O_TEXT` in the flags fix the translation;
+        // without either the descriptor takes the `_fmode` default, as
+        // Microsoft Learn documents for `_open`.
+        let text = if flags & 0x8000 != 0 {
+            false
+        } else if flags & 0x4000 != 0 {
+            true
+        } else {
+            !default_binary
+        };
         if !writable && truncate {
             return Err(EINVAL);
         }
@@ -1165,6 +1223,7 @@ impl FileStreams {
             error: false,
             orientation: 0,
             pushback: Vec::new(),
+            osfhandle: None,
             locks: Vec::new(),
         };
         if append && let Some(data) = drive.drive_file(&stream.path) {
@@ -1411,15 +1470,68 @@ impl FileStreams {
         self.insert_descriptor(Descriptor::Handle(handle))
     }
 
-    /// `_get_osfhandle`: the kernel handle a descriptor wraps. The CRT owns
-    /// one for the `_open_osfhandle` descriptors only; its own streams and
-    /// files have no kernel object behind them, so the answer is -1 with
-    /// `EBADF` there, as the hosted runtime answers for a bad descriptor.
-    pub(super) fn descriptor_handle(&self, fd: u32) -> Result<u64, u32> {
+    /// `_get_osfhandle`: the kernel handle a descriptor wraps. One made by
+    /// `_open_osfhandle` answers the handle it took ownership of. One the
+    /// CRT opened itself synthesizes the kernel file object the real CRT
+    /// always has behind its descriptors - it opens on top of CreateFile -
+    /// because win32 layers implement their `fstat` and `isatty` through
+    /// the handle and the file-type queries (#1312). The synthesis is lazy
+    /// and cached in the stream, so a guest that never asks pays nothing;
+    /// the object's position cell is its own, exactly as the kernel handle
+    /// of a real CRT stream moves independently of the buffered position.
+    pub(super) fn descriptor_handle(
+        &mut self,
+        drive: &mut ObjectState,
+        fd: u32,
+    ) -> Result<u64, u32> {
+        let fd = self.descriptor_terminal(fd)?;
         match self.descriptors.get(&fd) {
-            Some(Descriptor::Handle(handle)) => Ok(*handle),
-            _ => Err(EBADF),
+            Some(Descriptor::Handle(handle)) => return Ok(*handle),
+            Some(Descriptor::Owned(_) | Descriptor::Shared(_)) => {}
+            _ => return Err(EBADF),
         }
+        // The stream is the owned one's own state or the shared one's
+        // file; what the synthesis needs of it is owned before the object
+        // table and the cache both mutate.
+        let (path, access, position, cached) = {
+            let stream = match self.descriptors.get(&fd) {
+                Some(Descriptor::Shared(file)) => self.open.get(file).ok_or(EBADF)?,
+                Some(Descriptor::Owned(stream)) => stream,
+                _ => return Err(EBADF),
+            };
+            let mut access = 0;
+            if stream.readable {
+                access |= FILE_READ;
+            }
+            if stream.writable {
+                access |= FILE_WRITE;
+            }
+            (
+                stream.path.clone(),
+                access,
+                stream.position,
+                stream.osfhandle,
+            )
+        };
+        if let Some(handle) = cached {
+            return Ok(handle);
+        }
+        let object = super::files::OpenFile::for_interop(path, access, position);
+        let Some(handle) = drive.next_handle() else {
+            return Err(EBADF);
+        };
+        drive.insert_handle(handle, GuestObject::File(object));
+        match self.descriptors.get_mut(&fd) {
+            Some(Descriptor::Owned(stream)) => stream.osfhandle = Some(handle),
+            Some(Descriptor::Shared(file)) => {
+                let file = *file;
+                if let Some(stream) = self.open.get_mut(&file) {
+                    stream.osfhandle = Some(handle);
+                }
+            }
+            _ => {}
+        }
+        Ok(handle)
     }
 
     pub(super) fn descriptor_close(
@@ -1470,9 +1582,13 @@ impl FileStreams {
                     // stream, as CloseHandle makes it.
                     if drive.pipe_ref_release(handle) {
                         if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle)
-                            && *write
                         {
-                            state.lock().expect("pipe state").write_open = false;
+                            let mut pipe = state.lock().expect("pipe state");
+                            if *write {
+                                pipe.write_open = false;
+                            } else {
+                                pipe.read_open = false;
+                            }
                         }
                         drive.handles.remove(&handle);
                     }
@@ -1637,6 +1753,9 @@ fn handle_write(drive: &mut super::ObjectState, handle: u64, bytes: &[u8]) -> Re
                 return Err(EACCES);
             }
             let mut pipe = state.lock().expect("pipe state");
+            if !pipe.read_open {
+                return Err(EPIPE);
+            }
             if pipe.buffer.len() + bytes.len() > PIPE_CAP {
                 return Err(ENOSPC);
             }
@@ -1672,7 +1791,7 @@ fn handle_write(drive: &mut super::ObjectState, handle: u64, bytes: &[u8]) -> Re
 #[cfg(test)]
 mod tests {
     use super::super::ObjectState;
-    use super::{EBADF, EDEADLOCK, EINVAL, FileStreams, parse_mode};
+    use super::{EBADF, EDEADLOCK, EINVAL, EPIPE, FileStreams, parse_mode};
     use crate::memory::GuestMemory;
 
     /// The object `fopen` returns spans the legacy CRT's 48-byte `_iobuf`,
@@ -1689,7 +1808,7 @@ mod tests {
             .map_region(0x1000, 0x4000, crate::memory::MemoryPermissions::READ_WRITE)
             .unwrap();
         let file = streams
-            .open(&mut memory, &mut drive, b"target", b"w")
+            .open(&mut memory, &mut drive, b"target", b"w", false)
             .expect("open");
         // Every byte of the 48-byte `_iobuf` is mapped and zero: `_cnt` at 8
         // for the decrement, `_ptr` at 0 for the step, and the slack the
@@ -1707,6 +1826,35 @@ mod tests {
         assert_eq!(memory.read_u32(file + 8).expect("read"), 1);
     }
 
+    /// A write to a pipe whose read end is gone fails broken exactly as it
+    /// does on Windows: the end-of-stream direction was already tracked for
+    /// readers, and the read side now mirrors it for writers (#1471).
+    #[test]
+    fn pipe_writes_break_once_the_last_reader_closes() {
+        let mut streams = FileStreams::default();
+        let mut drive = ObjectState::default();
+        let (read_fd, write_fd) = streams.pipe_create(&mut drive).expect("pipe");
+        assert_eq!(
+            streams.descriptor_write(&mut drive, write_fd, b"abc"),
+            Ok(())
+        );
+        // The reader still holds its end: writes keep landing in the buffer.
+        assert_eq!(streams.descriptor_write(&mut drive, write_fd, b"d"), Ok(()));
+        let mut memory = GuestMemory::new();
+        assert!(streams.descriptor_close(&mut memory, &mut drive, read_fd));
+        assert_eq!(
+            streams.descriptor_write(&mut drive, write_fd, b"x"),
+            Err(EPIPE)
+        );
+        // Zero-length writes are the probe the CRT itself uses: they break
+        // against the same check rather than reporting success on a pipe no
+        // one can ever drain.
+        assert_eq!(
+            streams.descriptor_write(&mut drive, write_fd, b""),
+            Err(EPIPE)
+        );
+    }
+
     /// `_locking` holds exclusive byte ranges of the stream at its position:
     /// the exact-range unlock, the conflict across two independent opens of
     /// one file - even the stream's own ranges conflict, as LockFile refuses
@@ -1720,7 +1868,7 @@ mod tests {
         // exact unlock. A second unlock of the same range is the caller's
         // error, as an unmatched unlock is.
         let fd = streams
-            .open_descriptor(&mut drive, b"target", 2 | 0x100)
+            .open_descriptor(&mut drive, b"target", 2 | 0x100, false)
             .expect("open");
         assert_eq!(streams.lock_range(fd, 2, 10), Ok(()));
         assert_eq!(streams.lock_range(fd, 0, 10), Ok(()));
@@ -1732,7 +1880,7 @@ mod tests {
         // non-overlapping tail is free.
         assert_eq!(streams.lock_range(fd, 2, 6), Ok(()));
         let other = streams
-            .open_descriptor(&mut drive, b"target", 2)
+            .open_descriptor(&mut drive, b"target", 2, false)
             .expect("open");
         assert_eq!(streams.lock_range(other, 2, 3), Err(EDEADLOCK));
         // Even the holder's own ranges conflict with a new overlapping one,
@@ -1766,11 +1914,11 @@ mod tests {
         // Undisturbed standard descriptors are the standard streams: no
         // allocation may take them, so the first open lands at 3.
         let first = streams
-            .open(&mut memory, &mut drive, b"first", b"w")
+            .open(&mut memory, &mut drive, b"first", b"w", false)
             .expect("first open");
         assert!(first != 0);
         let fd = streams
-            .open_descriptor(&mut drive, b"first", 1)
+            .open_descriptor(&mut drive, b"first", 1, false)
             .expect("first descriptor");
         assert_eq!(fd, 3);
 
@@ -1778,14 +1926,14 @@ mod tests {
         // close-then-open redirection idiom depends on the number.
         streams.closed[0] = true;
         let zero = streams
-            .open_descriptor(&mut drive, b"first", 0)
+            .open_descriptor(&mut drive, b"first", 0, false)
             .expect("open onto the closed number");
         assert_eq!(zero, 0);
 
         // The table now carries 0, so the next open skips it and every
         // undisturbed standard number, landing at 4.
         let four = streams
-            .open_descriptor(&mut drive, b"first", 0)
+            .open_descriptor(&mut drive, b"first", 0, false)
             .expect("next descriptor");
         assert_eq!(four, 4);
 
@@ -1817,7 +1965,7 @@ mod tests {
                     spellings.push(format!("{}{suffix}+", &mode[..1]));
                 }
                 for spelling in spellings {
-                    let parsed = parse_mode(spelling.as_bytes())
+                    let parsed = parse_mode(spelling.as_bytes(), false)
                         .unwrap_or_else(|| panic!("{spelling} is a mode"));
                     assert_eq!(
                         (
@@ -1869,7 +2017,7 @@ mod tests {
             " r",
             "rb+t",
         ] {
-            assert!(parse_mode(mode.as_bytes()).is_none(), "{mode:?}");
+            assert!(parse_mode(mode.as_bytes(), false).is_none(), "{mode:?}");
         }
     }
 }

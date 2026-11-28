@@ -980,6 +980,18 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
+    let s = Arc::clone(state);
+    registry.register_with_status(
+        KERNEL32,
+        "GetProcessIdOfThread",
+        ServiceStatus::Partial,
+        move |args, cpu, _| match s.thread_rights(args.rcx) {
+            Ok(access) if access & THREAD_QUERY_RIGHTS != 0 => Ok(u64::from(s.process_id)),
+            Ok(_) => s.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0),
+            Err(error) => s.fail(cpu.gs_base, error, 0),
+        },
+    );
+
     // The bounds of the calling thread's stack, from its TEB: the high limit is
     // StackBase and the low limit is the bottom of the mapped stack, which is
     // also the reservation (stacks are committed whole). It returns nothing, so

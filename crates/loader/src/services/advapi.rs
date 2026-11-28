@@ -216,9 +216,8 @@ pub(super) fn register_tokens(registry: &mut ImportRegistry, state: &Arc<Service
         },
     );
 
-    // TokenUser answers the fixed SID of the machine's one user: revision 1,
-    // one sub-authority, the machine user RID, in the classic self-relative
-    // layout.
+    // TokenUser returns an AMD64 SID_AND_ATTRIBUTES header followed by the
+    // fixed SID. The header points to the SID in the caller's buffer.
     let info = Arc::clone(state);
     registry.register_with_status(
         MODULE,
@@ -232,23 +231,28 @@ pub(super) fn register_tokens(registry: &mut ImportRegistry, state: &Arc<Service
             if args.rdx != 1 {
                 return info.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
             }
-            // SID: rev 1, one sub-authority, NT authority (5), user RID 1000.
-            let sid: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 0xE8, 0x03, 0, 0];
-            let needed = 8 + sid.len() as u32;
-            memory
-                .write_u32(
-                    args.get(4, memory).map_err(ExitReason::MemoryFault)?,
-                    needed,
-                )
-                .map_err(ExitReason::MemoryFault)?;
-            if args.r9 < u64::from(needed) {
-                return info.fail(cpu.gs_base, ERROR_INSUFFICIENT_BUFFER, 0);
+            const HEADER_SIZE: usize = 16;
+            const RECORD_SIZE: usize = HEADER_SIZE + MACHINE_SID.len();
+            let return_length = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
+            let output = args.r8;
+            let short = (args.r9 as u32) < RECORD_SIZE as u32;
+            if !short {
+                memory
+                    .check_write(output, RECORD_SIZE)
+                    .map_err(ExitReason::MemoryFault)?;
             }
             memory
-                .write_u64(args.r8, args.r8 + 8)
+                .write_u32(return_length, RECORD_SIZE as u32)
                 .map_err(ExitReason::MemoryFault)?;
+            if short {
+                return info.fail(cpu.gs_base, ERROR_INSUFFICIENT_BUFFER, 0);
+            }
+
+            let mut record = [0; RECORD_SIZE];
+            record[..8].copy_from_slice(&(output + HEADER_SIZE as u64).to_le_bytes());
+            record[HEADER_SIZE..].copy_from_slice(&MACHINE_SID);
             memory
-                .write_bytes(args.r8 + 8, &sid)
+                .write_bytes(output, &record)
                 .map_err(ExitReason::MemoryFault)?;
             Ok(1)
         },
@@ -697,7 +701,7 @@ fn the_fixed_identity_token_answers_its_information_classes() {
     memory
         .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
         .unwrap();
-    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+    let try_call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
         let mut cpu = CpuState::default();
         for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
             .into_iter()
@@ -714,7 +718,10 @@ fn the_fixed_identity_token_answers_its_information_classes() {
         let descriptor = registry
             .resolve(MODULE, &ImportName::Name(symbol.to_owned()))
             .unwrap();
-        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory)
+    };
+    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+        try_call(memory, symbol, args).unwrap()
     };
     // The current process opens its one token; a foreign handle fails.
     assert_eq!(
@@ -740,8 +747,14 @@ fn the_fixed_identity_token_answers_its_information_classes() {
         ),
         1
     );
-    assert_eq!(memory.read_u32(0x1180).unwrap(), 20);
-    assert_eq!(memory.read_u8(0x1208).unwrap(), 1, "SID revision");
+    assert_eq!(memory.read_u32(0x1180).unwrap(), 28);
+    assert_eq!(memory.read_u64(0x1200).unwrap(), 0x1210);
+    assert_eq!(
+        memory.read_u64(0x1208).unwrap(),
+        0,
+        "attributes and padding"
+    );
+    assert_eq!(memory.read_u8(0x1210).unwrap(), 1, "SID revision");
     // A small buffer reports the needed size.
     assert_eq!(
         call(
@@ -751,7 +764,24 @@ fn the_fixed_identity_token_answers_its_information_classes() {
         ),
         0
     );
-    assert_eq!(memory.read_u32(0x1180).unwrap(), 20);
+    assert_eq!(memory.read_u32(0x1180).unwrap(), 28);
+    // The full record does not fit at the end of this writable mapping.
+    // The first 16 bytes and ReturnLength must retain their original values.
+    let canary = [0x5a; 16];
+    memory.write_bytes(0x2ff0, &canary).unwrap();
+    memory.write_u32(0x1180, 0xabcd).unwrap();
+    assert!(matches!(
+        try_call(
+            &mut memory,
+            "GetTokenInformation",
+            &[MACHINE_TOKEN, 1, 0x2ff0, 28, 0x1180]
+        ),
+        Err(ExitReason::MemoryFault(_))
+    ));
+    let mut header = [0; 16];
+    memory.read_bytes(0x2ff0, &mut header).unwrap();
+    assert_eq!(header, canary);
+    assert_eq!(memory.read_u32(0x1180).unwrap(), 0xabcd);
     // EqualSid compares byte-for-byte.
     let sid: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 0xE8, 0x03, 0, 0];
     memory.write_bytes(0x1300, &sid).unwrap();

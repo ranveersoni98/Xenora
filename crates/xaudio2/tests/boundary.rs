@@ -188,6 +188,26 @@ fn supported_wave_formats_parse() {
 }
 
 #[test]
+fn pcm_does_not_require_the_waveformatex_extension_size() {
+    let pcm = pcm16(2, 48_000);
+    let expected = WaveFormat::parse(&pcm).unwrap();
+    for size in [16, 17] {
+        assert_eq!(WaveFormat::parse(&pcm[..size]).unwrap(), expected);
+    }
+    assert!(matches!(
+        WaveFormat::parse(&pcm[..15]),
+        Err(Error::InvalidArg(_))
+    ));
+
+    let float = float32(2, 48_000);
+    assert!(matches!(
+        WaveFormat::parse(&float[..17]),
+        Err(Error::InvalidArg(_))
+    ));
+    assert!(WaveFormat::parse(&float).is_ok());
+}
+
+#[test]
 fn malformed_wave_formats_are_invalid_arguments() {
     let bad: [(&str, [u8; 18]); 9] = [
         ("zero channels", wave(1, 0, 48_000, 0, 0, 16)),
@@ -214,7 +234,7 @@ fn malformed_wave_formats_are_invalid_arguments() {
         );
     }
     assert!(matches!(
-        WaveFormat::parse(&pcm16(2, 48_000)[..17]),
+        WaveFormat::parse(&pcm16(2, 48_000)[..1]),
         Err(Error::InvalidArg(_))
     ));
 }

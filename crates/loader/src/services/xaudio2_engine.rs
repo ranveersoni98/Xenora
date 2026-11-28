@@ -172,11 +172,17 @@ fn create_source_voice(
         xaudio2.diagnostics.pointer += 1;
         return Ok(E_POINTER as u64);
     }
-    let Some(bytes) = read_struct::<18>(memory, format_address) else {
+    let Some(tag) = read_struct::<2>(memory, format_address).map(u16::from_le_bytes) else {
         xaudio2.diagnostics.pointer += 1;
         return Ok(E_POINTER as u64);
     };
-    let format = match WaveFormat::parse(&bytes) {
+    let mut bytes = [0; WaveFormat::STRUCTURE_SIZE];
+    let header = &mut bytes[..WaveFormat::header_size(tag)];
+    if memory.read_bytes(format_address, header).is_err() {
+        xaudio2.diagnostics.pointer += 1;
+        return Ok(E_POINTER as u64);
+    }
+    let format = match WaveFormat::parse(header) {
         Ok(format) => format,
         Err(error) => {
             xaudio2.diagnostics.not_implemented += 1;

@@ -2,12 +2,13 @@
 
 //! The wave formats a source voice accepts.
 //!
-//! The guest hands XAudio2 a WAVEFORMATEX structure. This module reads that
-//! structure, rejects the formats the public documentation does not allow and
-//! keeps the small subset the bounded core model supports.
+//! The guest hands XAudio2 a PCMWAVEFORMAT or WAVEFORMATEX structure.
+//! This module validates the header for the bounded audio model.
 
 use crate::consts::{XAUDIO2_MAX_AUDIO_CHANNELS, XAUDIO2_MAX_SAMPLE_RATE, XAUDIO2_MIN_SAMPLE_RATE};
 use crate::hresult::Error;
+
+const PCM_TAG: u16 = 1;
 
 /// The sample encoding of a wave format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,9 +21,8 @@ pub enum SampleFormat {
 
 /// The wave format of a source voice.
 ///
-/// The fields mirror the WAVEFORMATEX structure the guest passes to
-/// IXAudio2SourceVoice::SetFormat. Only the fields the model needs are kept;
-/// the callback size of the structure is read and ignored.
+/// The fields mirror the format supplied to `IXAudio2::CreateSourceVoice`.
+/// The model keeps the fields common to PCMWAVEFORMAT and WAVEFORMATEX.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaveFormat {
     /// The sample encoding.
@@ -37,9 +37,18 @@ pub struct WaveFormat {
 
 impl WaveFormat {
     /// The number of bytes a WAVEFORMATEX structure occupies on the wire.
-    const STRUCTURE_SIZE: usize = 18;
+    pub const STRUCTURE_SIZE: usize = 18;
 
-    /// Reads a WAVEFORMATEX structure from the bytes the guest laid out.
+    /// Minimum readable header for the given format tag. PCM can use the
+    /// 16-byte PCMWAVEFORMAT structure, which has no `cbSize` field.
+    pub const fn header_size(format_tag: u16) -> usize {
+        match format_tag {
+            PCM_TAG => 16,
+            _ => Self::STRUCTURE_SIZE,
+        }
+    }
+
+    /// Reads a PCMWAVEFORMAT or WAVEFORMATEX header from the guest bytes.
     ///
     /// The checks run in the order the public documentation implies: the
     /// format tag first, then the channel count, the sample rate, the bit
@@ -48,10 +57,13 @@ impl WaveFormat {
     /// Error::NotImplemented, and a structure that contradicts itself is
     /// refused with Error::InvalidArg.
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() < Self::STRUCTURE_SIZE {
-            return Err(Error::InvalidArg("a wave format needs 18 bytes"));
+        let Some(tag) = bytes.first_chunk::<2>() else {
+            return Err(Error::InvalidArg("a wave format needs a format tag"));
+        };
+        let tag = u16::from_le_bytes(*tag);
+        if bytes.len() < Self::header_size(tag) {
+            return Err(Error::InvalidArg("the wave format header is incomplete"));
         }
-        let tag = read_u16(bytes, 0);
         let channels = read_u16(bytes, 2);
         let sample_rate = read_u32(bytes, 4);
         let average_bytes = read_u32(bytes, 8);
@@ -61,7 +73,7 @@ impl WaveFormat {
         // The public documentation names two tags the model supports. WAVE_FORMAT_EXTENSIBLE
         // and every compressed tag are well formed but unmodelled.
         let format = match tag {
-            1 => SampleFormat::Pcm16,
+            PCM_TAG => SampleFormat::Pcm16,
             3 => SampleFormat::Float32,
             _ => {
                 return Err(Error::NotImplemented(
